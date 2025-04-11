@@ -1,7 +1,8 @@
 CC=g++
 NVCC=nvcc
-LIB_FOLDERS=./libraries/bin
-LIBS=nvoptix cudart
+LIB_FOLDERS=./libraries/bin /opt/cuda/lib/
+LIBS=nvoptix cudart assimp
+PATH:=/opt/cuda/bin:$(PATH)
 
 SRC=source/
 INC=include/
@@ -10,7 +11,7 @@ DEV=device/
 EXE=./optix_gi
 DEP=dependencies/
 
-INCLUDES=./libraries/include $(INC)
+INCLUDES=./libraries/include/ $(INC) /opt/cuda/include/
 
 SRCOUT=$(BIN)$(SRC)
 DEVOUT=$(BIN)$(DEV)
@@ -42,7 +43,7 @@ test: $(EXE)
 	$(EXE)
 clean:
 	@echo "\n>- Removing Generated Content"
-	rm -rf $(BIN) $(EXE) output.png
+	rm -rf $(BIN) $(EXE) *.png
 
 
 # File tasks
