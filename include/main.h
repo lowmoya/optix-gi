@@ -10,6 +10,12 @@ struct Params {
     OptixTraversableHandle handle;
 };
 
+struct HitGroupData {
+    uint3 * indices;
+    float3 * vertices;
+    float3 color;
+};
+
 /* Math extensions */
 inline __host__ __device__
 float3 operator+(const float3& a, const float3& b) {

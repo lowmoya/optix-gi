@@ -97,7 +97,7 @@ int main()
 		};
 
 		int ptx_length;
-		char * ptx = readFile("build/device/model.ptx", ptx_length);
+		char * ptx = readFile("build/device/main.ptx", ptx_length);
 		
 		OPTIX_CALL(optixModuleCreate(
 			context, &module_options, &pipeline_comp_options, ptx, ptx_length, LOG, &LOG_SIZE, &module
@@ -114,7 +114,7 @@ int main()
 			.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN,
 			.raygen = {
 				.module = module,
-				.entryFunctionName = "__raygen__model"
+				.entryFunctionName = "__raygen__gi"
 			}
 		};
 		OPTIX_LOG_CALL(optixProgramGroupCreate(
@@ -125,7 +125,7 @@ int main()
 			.kind = OPTIX_PROGRAM_GROUP_KIND_MISS,
 			.miss = {
 				.module = module,
-				.entryFunctionName = "__miss__model"
+				.entryFunctionName = "__miss__gi"
 			}
 		};
 		OPTIX_LOG_CALL(optixProgramGroupCreate(
@@ -136,7 +136,7 @@ int main()
 			.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP,
 			.hitgroup = {
 				.moduleCH = module,
-				.entryFunctionNameCH = "__closesthit__model"
+				.entryFunctionNameCH = "__closesthit__gi"
 			}
 		};
 		OPTIX_LOG_CALL(optixProgramGroupCreate(
@@ -169,6 +169,8 @@ int main()
 	}
 
 	/* Set up shader binding table. */
+	// Have closest hit include the geometries index, vertex, normal info
+	// they should all share a pointer to a list of area lights.
 	OptixShaderBindingTable sbt = {}; {
 		/* Raygen record. */
 		// Create record on Host.
@@ -224,32 +226,34 @@ int main()
 	CUdeviceptr d_traversable_mem;
 	OptixTraversableHandle traversable_handle;
 
-	{
-		const char * models[] = {
-			"resources/teapot.obj"
-		};
-		const int model_count = sizeof(models) / sizeof(*models);
+	const char * files[] = {
+		"resources/teapot.obj",
+		"resources/floor.obj"
+	};
+	const int model_count = sizeof(files) / sizeof(*files);
 
+	struct {
+		CUdeviceptr index;
+		CUdeviceptr vertex;
+	} models[model_count];
+
+	{
 		const uint32_t input_flags[] = { OPTIX_GEOMETRY_FLAG_NONE };
 
-		struct {
-			CUdeviceptr index;
-			CUdeviceptr vertex;
-		}input_buffers[model_count];
 		OptixBuildInput inputs[model_count];
 
 		for (int m = 0; m < model_count; ++m) {
 			// Load scene
 			Assimp::Importer importer;
 			const aiScene * scene = importer.ReadFile(
-				models[m],
+				files[m],
 				aiProcess_Triangulate | aiProcess_JoinIdenticalVertices
 				| aiProcess_GenNormals | aiProcess_OptimizeMeshes
 				| aiProcess_PreTransformVertices
 			);
 			if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE)
 					|| !scene->mRootNode) {
-				fprintf(stderr, "[Error] Failed to load '%s'.\n", models[m]);
+				fprintf(stderr, "[Error] Failed to load '%s'.\n", files[m]);
 				exit(1);
 			}
 
@@ -284,14 +288,14 @@ int main()
 
 			// Fill out build info
 
-			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&input_buffers[m].index),
+			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[m].index),
 				face_count * sizeof(uint3)));
-			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&input_buffers[m].vertex),
+			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[m].vertex),
 				vertex_count * sizeof(float3)));
 
-			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(input_buffers[m].index),
+			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[m].index),
 				indices, face_count * sizeof(uint3), cudaMemcpyHostToDevice));
-			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(input_buffers[m].vertex),
+			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[m].vertex),
 				vertices, vertex_count * sizeof(float3), cudaMemcpyHostToDevice));
 			
 			free(indices);
@@ -300,10 +304,10 @@ int main()
 			inputs[m] = {
 				.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES,
 				.triangleArray = {
-					.vertexBuffers = &input_buffers[m].vertex,
+					.vertexBuffers = &models[m].vertex,
 					.numVertices = vertex_count,
 					.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3,
-					.indexBuffer = input_buffers[m].index,
+					.indexBuffer = models[m].index,
 					.numIndexTriplets = face_count,
 					.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3,
 					.flags = input_flags,
@@ -331,10 +335,6 @@ int main()
 
 		// Cleanup
 		CUDA_CALL(cudaFree(reinterpret_cast<void *>(d_temp_mem)));
-		for (auto& buffers : input_buffers) {
-			CUDA_CALL(cudaFree(reinterpret_cast<void *>(buffers.index)));
-			CUDA_CALL(cudaFree(reinterpret_cast<void *>(buffers.vertex)));
-		}
 	}
 
 	/* Launch the application. */
@@ -383,6 +383,10 @@ int main()
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(sbt.hitgroupRecordBase)));
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(sbt.missRecordBase)));
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(d_traversable_mem)));
+		for (auto& model : models) {
+			CUDA_CALL(cudaFree(reinterpret_cast<void *>(model.index)));
+			CUDA_CALL(cudaFree(reinterpret_cast<void *>(model.vertex)));
+		}
 
 		OPTIX_CALL(optixPipelineDestroy(pipeline));
 		OPTIX_CALL(optixProgramGroupDestroy(raygen_program_group));

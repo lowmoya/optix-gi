@@ -9,7 +9,7 @@ __constant__ Params params;
 }
 
 extern "C"
-__global__ void __raygen__model()
+__global__ void __raygen__gi()
 {
     /* Generate the ray. */
     const uint3 launch_index = optixGetLaunchIndex();
@@ -46,7 +46,7 @@ __global__ void __raygen__model()
 }
 
 extern "C"
-__global__ void __closesthit__model()
+__global__ void __closesthit__gi()
 {
     const float2 barycentrics = optixGetTriangleBarycentrics();
     optixSetPayload_0(__float_as_int(barycentrics.x));
@@ -55,7 +55,7 @@ __global__ void __closesthit__model()
 }
 
 extern "C"
-__global__ void __miss__model()
+__global__ void __miss__gi()
 {
     optixSetPayload_0(__float_as_int(0.0f));
     optixSetPayload_1(__float_as_int(0.0f));
