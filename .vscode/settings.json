@@ -1,0 +1,9 @@
+{
+    "makefile.launchConfigurations": [
+        {
+            "cwd": "/home/ava/optix-gi",
+            "binaryPath": "/home/ava/optix-gi/optix_gi",
+            "binaryArgs": []
+        }
+    ]
+}
