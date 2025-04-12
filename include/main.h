@@ -17,10 +17,30 @@ struct HitGroupData {
     float3 color;
 };
 
+enum RayType {
+    RT_RADIANCE = 0,
+    RT_SHADOW,
+    RT_COUNT
+};
+
+enum MissType {
+    MT_RADIANCE = 0,
+    MT_SHADOW,
+    MT_COUNT
+};
+
 /* Math extensions */
 inline __host__ __device__
 float3 operator+(const float3& a, const float3& b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+inline __host__ __device__
+float3 operator-(const float3& a, const float3& b) {
+    return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+inline __host__ __device__
+float3 operator*(const float3& a, const float3& b) {
+    return make_float3(a.x * b.x, a.y * b.y, a.z * b.z);
 }
 inline __host__ __device__
 float3 operator*(const float3& a, float scalar) {
@@ -42,6 +62,10 @@ float magnitude(const float3& v) {
 inline __host__ __device__
 float3 normalized(const float3& v) {
     return v / magnitude(v);
+}
+inline __host__ __device__
+float dot(const float3& a, const float3& b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
 #endif

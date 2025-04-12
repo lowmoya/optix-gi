@@ -41,7 +41,7 @@ template <> struct SbtRecord<void> {
 	__align__(OPTIX_SBT_RECORD_ALIGNMENT) char header[OPTIX_SBT_RECORD_HEADER_SIZE];
 };
 
-#define MAX_TRACING_DEPTH 2
+#define MAX_TRACING_DEPTH 10
 
 
 
@@ -91,64 +91,104 @@ int main()
 		.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE,
 		.pipelineLaunchParamsVariableName = "params"
 	};
-	OptixModule module = nullptr; {
+	OptixModule radiance_module = nullptr; {
 		OptixModuleCompileOptions module_options = {
 			.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0,
 			.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL
 		};
 
 		int ptx_length;
-		char * ptx = readFile("build/device/main.ptx", ptx_length);
+		char * ptx = readFile("build/device/radiance.ptx", ptx_length);
 		
 		OPTIX_CALL(optixModuleCreate(
-			context, &module_options, &pipeline_comp_options, ptx, ptx_length, LOG, &LOG_SIZE, &module
+			context, &module_options, &pipeline_comp_options, ptx, ptx_length, LOG, &LOG_SIZE, &radiance_module
+		));
+		free(ptx);
+	}
+	OptixModule shadow_module = nullptr; {
+		OptixModuleCompileOptions module_options = {
+			.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0,
+			.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL
+		};
+
+		int ptx_length;
+		char * ptx = readFile("build/device/shadow.ptx", ptx_length);
+		
+		OPTIX_CALL(optixModuleCreate(
+			context, &module_options, &pipeline_comp_options, ptx, ptx_length, LOG, &LOG_SIZE, &shadow_module
 		));
 		free(ptx);
 	}
 
+
 	/* Create program groups from the Module, which correspond to specific function calls from the
 	 * PTX file. */
-	OptixProgramGroup raygen_program_group, hit_program_group, miss_program_group; {
+	OptixProgramGroup radiance_raygen_program, radiance_hit_program, radiance_miss_program; {
 		OptixProgramGroupOptions options = {};
 
 		OptixProgramGroupDesc raygen_description = {
 			.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN,
 			.raygen = {
-				.module = module,
-				.entryFunctionName = "__raygen__gi"
+				.module = radiance_module,
+				.entryFunctionName = "__raygen__radiance"
 			}
 		};
 		OPTIX_LOG_CALL(optixProgramGroupCreate(
-			context, &raygen_description, 1, &options, LOG, &LOG_SIZE, &raygen_program_group
+			context, &raygen_description, 1, &options, LOG, &LOG_SIZE, &radiance_raygen_program
 		));
 
 		OptixProgramGroupDesc miss_description = {
 			.kind = OPTIX_PROGRAM_GROUP_KIND_MISS,
 			.miss = {
-				.module = module,
-				.entryFunctionName = "__miss__gi"
+				.module = radiance_module,
+				.entryFunctionName = "__miss__radiance"
 			}
 		};
 		OPTIX_LOG_CALL(optixProgramGroupCreate(
-			context, &miss_description, 1, &options, LOG, &LOG_SIZE, &miss_program_group
+			context, &miss_description, 1, &options, LOG, &LOG_SIZE, &radiance_miss_program
 		));
 
 		OptixProgramGroupDesc hit_description = {
 			.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP,
 			.hitgroup = {
-				.moduleCH = module,
-				.entryFunctionNameCH = "__closesthit__gi"
+				.moduleCH = radiance_module,
+				.entryFunctionNameCH = "__closesthit__radiance"
 			}
 		};
 		OPTIX_LOG_CALL(optixProgramGroupCreate(
-			context, &hit_description, 1, &options, LOG, &LOG_SIZE, &hit_program_group
+			context, &hit_description, 1, &options, LOG, &LOG_SIZE, &radiance_hit_program
+		));
+	}
+	OptixProgramGroup shadow_hit_program, shadow_miss_program; {
+		OptixProgramGroupOptions options = {};
+
+		OptixProgramGroupDesc hit_description = {
+			.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP,
+			.hitgroup = {
+				.moduleAH = shadow_module,
+				.entryFunctionNameAH = "__anyhit__shadow"
+			}
+		};
+		OPTIX_LOG_CALL(optixProgramGroupCreate(
+			context, &hit_description, 1, &options, LOG, &LOG_SIZE, &shadow_hit_program
+		));
+
+		OptixProgramGroupDesc miss_description = {
+			.kind = OPTIX_PROGRAM_GROUP_KIND_MISS,
+			.miss = {
+				.module = shadow_module,
+				.entryFunctionName = "__miss__shadow"
+			}
+		};
+		OPTIX_LOG_CALL(optixProgramGroupCreate(
+			context, &miss_description, 1, &options, LOG, &LOG_SIZE, &shadow_miss_program
 		));
 	}
 
 	/* Create a pipeline from the groups. */
 	OptixPipeline pipeline = nullptr; {
 		/* Creation. */
-		OptixProgramGroup program_groups[] = { raygen_program_group, hit_program_group, miss_program_group };
+		OptixProgramGroup program_groups[] = { radiance_raygen_program, radiance_hit_program, radiance_miss_program, shadow_hit_program, shadow_miss_program };
 
 		OptixPipelineLinkOptions link_options = { .maxTraceDepth = MAX_TRACING_DEPTH };
 		OPTIX_LOG_CALL(optixPipelineCreate(
@@ -171,26 +211,26 @@ int main()
 
 
 	/* Prepare accelerated structures. */
-	CUdeviceptr d_traversable_mem;
-	OptixTraversableHandle gas_handle;
-
+	
 	const char * files[] = {
+		"resources/floor.obj",
 		"resources/teapot.obj",
-		"resources/floor.obj"
 	};
 	const int model_count = sizeof(files) / sizeof(*files);
 
 	struct {
-		CUdeviceptr index;
-		CUdeviceptr vertex;
+		CUdeviceptr d_index;
+		CUdeviceptr d_vertex;
+		CUdeviceptr d_normal;
+		CUdeviceptr d_gas_mem;
 	} models[model_count];
 
-	{
+	CUdeviceptr d_tlas_mem;
+	OptixTraversableHandle tlas_handle;  {
 		const uint32_t input_flags[] = { OPTIX_GEOMETRY_FLAG_NONE };
 
-		OptixBuildInput inputs[model_count];
-
-		for (int m = 0; m < model_count; ++m) {
+		OptixInstance instances[model_count];
+		for (uint m = 0; m < model_count; ++m) {
 			// Load scene
 			Assimp::Importer importer;
 			const aiScene * scene = importer.ReadFile(
@@ -218,11 +258,13 @@ int main()
 
 			// Read data
 			float3 * vertices = (float3 *)malloc(vertex_count * sizeof(float3));
+			float3 * normals = (float3 *)malloc(vertex_count * sizeof(float3));
 			uint * indices = (uint *)malloc(face_count * 3 * sizeof(uint));
 			uint vertex_offset = 0, index_offset = 0;
 			for (int mi = 0; mi < scene->mNumMeshes; ++mi) {
 				aiMesh * mesh = scene->mMeshes[mi];
 				memcpy(vertices + vertex_offset, mesh->mVertices, mesh->mNumVertices * sizeof(float3));
+				memcpy(normals + vertex_offset, mesh->mNormals, mesh->mNumVertices * sizeof(float3));
 				vertex_offset += mesh->mNumVertices;
 
 				for (int fi = 0; fi < mesh->mNumFaces; ++fi) {
@@ -236,80 +278,84 @@ int main()
 
 			// Fill out build info
 
-			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[m].index),
+			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[m].d_index),
 				face_count * sizeof(uint3)));
-			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[m].vertex),
+			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[m].d_vertex),
+				vertex_count * sizeof(float3)));
+			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[m].d_normal),
 				vertex_count * sizeof(float3)));
 
-			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[m].index),
+			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[m].d_index),
 				indices, face_count * sizeof(uint3), cudaMemcpyHostToDevice));
-			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[m].vertex),
+			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[m].d_vertex),
 				vertices, vertex_count * sizeof(float3), cudaMemcpyHostToDevice));
+			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[m].d_normal),
+				normals, vertex_count * sizeof(float3), cudaMemcpyHostToDevice));
 			
 			free(indices);
 			free(vertices);
+			free(normals);
 			
-			inputs[m] = {
+			OptixBuildInput input = {
 				.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES,
 				.triangleArray = {
-					.vertexBuffers = &models[m].vertex,
+					.vertexBuffers = &models[m].d_vertex,
 					.numVertices = vertex_count,
 					.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3,
-					.indexBuffer = models[m].index,
+					.indexBuffer = models[m].d_index,
 					.numIndexTriplets = face_count,
 					.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3,
 					.flags = input_flags,
 					.numSbtRecords = 1
 				}
 			};
+
+			OptixAccelBuildOptions options = {
+				.buildFlags = OPTIX_BUILD_FLAG_NONE,
+				.operation = OPTIX_BUILD_OPERATION_BUILD
+			};
+			OptixAccelBufferSizes buffer_sizes;
+			optixAccelComputeMemoryUsage(context, &options, &input, 1, &buffer_sizes);	
+		
+			CUdeviceptr d_tmp_mem;
+			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_tmp_mem), buffer_sizes.tempSizeInBytes));
+			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[m].d_gas_mem), buffer_sizes.outputSizeInBytes));
+	
+			// Build the structure
+			OptixTraversableHandle gas_handle;
+			OPTIX_CALL(optixAccelBuild(context, 0, &options, &input, 1,
+				d_tmp_mem, buffer_sizes.tempSizeInBytes, models[m].d_gas_mem,
+				buffer_sizes.outputSizeInBytes, &gas_handle, nullptr, 0));
+	
+			CUDA_CALL(cudaFree(reinterpret_cast<void *>(d_tmp_mem)));
+
+
+			instances[m] = {
+				.instanceId = 0,
+				.sbtOffset = m,
+				.visibilityMask = 255,
+				.flags = OPTIX_INSTANCE_FLAG_NONE,
+				.traversableHandle = gas_handle
+			};
+			float transform[12] = {
+				1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0
+			};
+			memcpy(instances[m].transform, transform, sizeof(transform));
 		}
 
 		// Allocate memory for the build
-		OptixAccelBuildOptions options = {
-			.buildFlags = OPTIX_BUILD_FLAG_NONE,
-			.operation = OPTIX_BUILD_OPERATION_BUILD
-		};
-		OptixAccelBufferSizes buffer_sizes;
-		optixAccelComputeMemoryUsage(context, &options, inputs, model_count, &buffer_sizes);	
-	
-		CUdeviceptr d_temp_mem;
-		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_temp_mem), buffer_sizes.tempSizeInBytes));
-		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_traversable_mem), buffer_sizes.outputSizeInBytes));
-
-		// Build the structure
-		OPTIX_CALL(optixAccelBuild(context, 0, &options, inputs, model_count,
-			d_temp_mem, buffer_sizes.tempSizeInBytes, d_traversable_mem,
-			buffer_sizes.outputSizeInBytes, &gas_handle, nullptr, 0));
-
-		// Cleanup
-		CUDA_CALL(cudaFree(reinterpret_cast<void *>(d_temp_mem)));
-	}
-
-	// Build TLAS ontop of GAS
-	CUdeviceptr d_tlas_output_buffer;
-	OptixTraversableHandle tlas_handle; {
-		OptixInstance instance = {};
-		instance.traversableHandle = gas_handle;
-		instance.instanceId = 0;
-		instance.sbtOffset = 0;
-		instance.visibilityMask = 255;
-		instance.flags = OPTIX_INSTANCE_FLAG_NONE;
-
-		float transform[12] = {
-			1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0
-		};
-		memcpy(instance.transform, transform, sizeof(transform));
-
+		
+		
 		CUdeviceptr d_instances;
-		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_instances), sizeof(instance)));
-		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_instances), &instance, sizeof(instance),
+		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_instances), sizeof(instances)));
+		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_instances), &instances, sizeof(instances),
 			cudaMemcpyHostToDevice));
 
 		OptixBuildInput tlas_input = {
 			.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES,
 			.instanceArray = {
 				.instances = d_instances,
-				.numInstances = 1
+				.numInstances = model_count
 			}
 		};
 		OptixAccelBuildOptions accel_options = {
@@ -321,11 +367,14 @@ int main()
 		optixAccelComputeMemoryUsage(
 			context, &accel_options, &tlas_input, 1, &buffer_sizes
 		);
-		CUdeviceptr d_tmp_buffer;
-		cudaMalloc(reinterpret_cast<void**>(&d_tmp_buffer), buffer_sizes.tempSizeInBytes);
-		cudaMalloc(reinterpret_cast<void**>(&d_tlas_output_buffer), buffer_sizes.outputSizeInBytes);
-		optixAccelBuild(context, 0, &accel_options, &tlas_input, 1, d_tmp_buffer, buffer_sizes.tempSizeInBytes,
-			d_tlas_output_buffer, buffer_sizes.outputSizeInBytes, &tlas_handle, nullptr, 0);
+		CUdeviceptr d_tmp_mem;
+		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_tmp_mem), buffer_sizes.tempSizeInBytes));
+		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_tlas_mem), buffer_sizes.outputSizeInBytes));
+		OPTIX_CALL(optixAccelBuild(context, 0, &accel_options, &tlas_input, 1, d_tmp_mem, buffer_sizes.tempSizeInBytes,
+			d_tlas_mem, buffer_sizes.outputSizeInBytes, &tlas_handle, nullptr, 0));
+		
+		// Cleanup
+		CUDA_CALL(cudaFree(reinterpret_cast<void*>(d_tmp_mem)));
 	}
 
 	/* Set up shader binding table. */
@@ -335,7 +384,7 @@ int main()
 		/* Raygen record. */
 		// Create record on Host.
 		SbtRecord<void> raygen_record = {};
-		OPTIX_CALL(optixSbtRecordPackHeader(raygen_program_group, &raygen_record));
+		OPTIX_CALL(optixSbtRecordPackHeader(radiance_raygen_program, &raygen_record));
 
 		// Allocate record on GPU and copy data.
 		CUdeviceptr d_raygen_record;
@@ -346,11 +395,29 @@ int main()
 
 		/* Hit record. */
 		// Create record on Host.
-		SbtRecord<void> hit_records[model_count] = {};
-		for (int m = 0; m < model_count; ++m) {
-			OPTIX_CALL(optixSbtRecordPackHeader(hit_program_group, hit_records + m));
+		SbtRecord<HitGroupData> hit_records[model_count * RT_COUNT] = {};
+		for (int r = 0; r < RT_COUNT; ++r) {
+			for (int m = 0; m < model_count; ++m) {
+				switch(r) {
+				case RT_RADIANCE:
+					OPTIX_CALL(optixSbtRecordPackHeader(radiance_hit_program, hit_records + r + m * RT_COUNT));
+					hit_records[r + m * RT_COUNT].data = {
+						.indices = reinterpret_cast<uint3*>(models[m].d_index),
+						.vertices = reinterpret_cast<float3*>(models[m].d_vertex),
+						.normals = reinterpret_cast<float3*>(models[m].d_normal)
+					};
+					break;
+				case RT_SHADOW:
+					OPTIX_CALL(optixSbtRecordPackHeader(shadow_hit_program, hit_records + r + m * RT_COUNT));
+					hit_records[r + m * RT_COUNT].data = {};
+					break;
+				}
+				
+			}
+			hit_records[r + RT_COUNT * 0].data.color = make_float3(.8, .8, .8);
+			hit_records[r + RT_COUNT * 1].data.color = make_float3(.1, .4, 1.0);
 		}
-
+		
 		// Allocate record on GPU and copy data.
 		CUdeviceptr d_hit_records;
 		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_hit_records), sizeof(hit_records)));
@@ -359,23 +426,24 @@ int main()
 
 		/* Miss record. */
 		// Create record on GPU.
-		SbtRecord<void> miss_record = {};
-		OPTIX_CALL(optixSbtRecordPackHeader(miss_program_group, &miss_record))
+		SbtRecord<void> miss_records[MT_COUNT] = {};
+		OPTIX_CALL(optixSbtRecordPackHeader(radiance_miss_program, miss_records + MT_RADIANCE));
+		OPTIX_CALL(optixSbtRecordPackHeader(shadow_miss_program, miss_records + MT_SHADOW));
 
 		// Create record on Host and copy to GPU.
-		CUdeviceptr d_miss_record;
-		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_miss_record), sizeof(miss_record)));
-		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_miss_record), &miss_record,
-			sizeof(miss_record), cudaMemcpyHostToDevice));
+		CUdeviceptr d_miss_records;
+		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_miss_records), sizeof(miss_records)));
+		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_miss_records), &miss_records,
+			sizeof(miss_records), cudaMemcpyHostToDevice));
 
 		/* Assign records to the binding table. */
 		sbt.raygenRecord = d_raygen_record;
 		sbt.hitgroupRecordBase = d_hit_records;
 		sbt.hitgroupRecordStrideInBytes = sizeof(hit_records[0]);
-		sbt.hitgroupRecordCount = 1;
-		sbt.missRecordBase = d_miss_record;
-		sbt.missRecordStrideInBytes = sizeof(miss_record);
-		sbt.missRecordCount = 1;
+		sbt.hitgroupRecordCount = model_count * RT_COUNT;
+		sbt.missRecordBase = d_miss_records;
+		sbt.missRecordStrideInBytes = sizeof(miss_records[0]);
+		sbt.missRecordCount = sizeof(miss_records)/sizeof(miss_records[0]);
 	}
 
 	uchar4 * d_render_buffer = nullptr;
@@ -430,17 +498,18 @@ int main()
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(sbt.raygenRecord)));
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(sbt.hitgroupRecordBase)));
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(sbt.missRecordBase)));
-		CUDA_CALL(cudaFree(reinterpret_cast<void*>(d_traversable_mem)));
-		CUDA_CALL(cudaFree(reinterpret_cast<void*>(d_tlas_output_buffer)));
+		CUDA_CALL(cudaFree(reinterpret_cast<void*>(d_tlas_mem)));
 		for (auto& model : models) {
-			CUDA_CALL(cudaFree(reinterpret_cast<void *>(model.index)));
-			CUDA_CALL(cudaFree(reinterpret_cast<void *>(model.vertex)));
+			CUDA_CALL(cudaFree(reinterpret_cast<void *>(model.d_index)));
+			CUDA_CALL(cudaFree(reinterpret_cast<void *>(model.d_vertex)));
+			CUDA_CALL(cudaFree(reinterpret_cast<void *>(model.d_normal)));
+			CUDA_CALL(cudaFree(reinterpret_cast<void*>(model.d_gas_mem)));
 		}
 
 		OPTIX_CALL(optixPipelineDestroy(pipeline));
-		OPTIX_CALL(optixProgramGroupDestroy(raygen_program_group));
-		OPTIX_CALL(optixProgramGroupDestroy(hit_program_group));
-		OPTIX_CALL(optixProgramGroupDestroy(miss_program_group));
+		OPTIX_CALL(optixProgramGroupDestroy(radiance_raygen_program));
+		OPTIX_CALL(optixProgramGroupDestroy(radiance_hit_program));
+		OPTIX_CALL(optixProgramGroupDestroy(radiance_miss_program));
 
 		OPTIX_CALL(optixDeviceContextDestroy(context));
 	}
