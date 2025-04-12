@@ -89,18 +89,17 @@ __global__ void __closesthit__radiance()
         + bc.x * group_data.normals[indices.y]
         + bc.y * group_data.normals[indices.z]));
 
-    const float3 light = make_float3(10, 20, 0);
+    const float3 light = make_float3(0, 6, 0);
 
     const float3 incoming = optixGetWorldRayDirection();
     const float3 outgoing = normalized(light - position);
 
-    uint unobstructed = 1;
+    uint unobstructed = 0;
     optixTrace(params.handle, position, outgoing, 0.0001, magnitude(light - position), 0, OptixVisibilityMask(255),
         OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT, RT_SHADOW, RT_COUNT, MT_SHADOW, unobstructed);
-    // const float3 color = unobstructed ? calcColor(incoming, outgoing, normal, .2, make_float3(0.04, 0.04, 0.04), group_data.color)
-        // * 5000 / pow(magnitude(light), 2) * dot(normal, outgoing) : make_float3(0, 0, 0);
+    const float3 color = unobstructed ? calcColor(incoming, outgoing, normal, .2, make_float3(0.04, 0.04, 0.04), group_data.color)
+        * 500 / pow(magnitude(light), 2) * dot(normal, outgoing) : make_float3(0, 0, 0);
     // const float3 color = unobstructed ? make_float3(1, 1, 1) : make_float3(0, 0, 0);
-    const float3 color = make_float3(1, 1, 1);
     optixSetPayload_0(__float_as_int(min(color.x, 1.0)));
     optixSetPayload_1(__float_as_int(min(color.y, 1.0)));
     optixSetPayload_2(__float_as_int(min(color.z, 1.0)));

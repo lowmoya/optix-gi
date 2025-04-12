@@ -17,4 +17,6 @@ __global__ void __anyhit__shadow()
 
 extern "C"
 __global__ void __miss__shadow()
-{}
+{
+    optixSetPayload_0(1);
+}

@@ -213,8 +213,8 @@ int main()
 	/* Prepare accelerated structures. */
 	
 	const char * files[] = {
-		"resources/floor.obj",
 		"resources/teapot.obj",
+		"resources/floor.obj",
 	};
 	const int model_count = sizeof(files) / sizeof(*files);
 
@@ -398,18 +398,24 @@ int main()
 		SbtRecord<HitGroupData> hit_records[model_count * RT_COUNT] = {};
 		for (int r = 0; r < RT_COUNT; ++r) {
 			for (int m = 0; m < model_count; ++m) {
+				const int index = m + r * model_count;
 				switch(r) {
 				case RT_RADIANCE:
-					OPTIX_CALL(optixSbtRecordPackHeader(radiance_hit_program, hit_records + r + m * RT_COUNT));
-					hit_records[r + m * RT_COUNT].data = {
+					OPTIX_CALL(optixSbtRecordPackHeader(radiance_hit_program, hit_records + index));
+					hit_records[index].data = {
 						.indices = reinterpret_cast<uint3*>(models[m].d_index),
 						.vertices = reinterpret_cast<float3*>(models[m].d_vertex),
 						.normals = reinterpret_cast<float3*>(models[m].d_normal)
 					};
 					break;
 				case RT_SHADOW:
-					OPTIX_CALL(optixSbtRecordPackHeader(shadow_hit_program, hit_records + r + m * RT_COUNT));
-					hit_records[r + m * RT_COUNT].data = {};
+					OPTIX_CALL(optixSbtRecordPackHeader(shadow_hit_program, hit_records + index));
+					hit_records[index].data = {};
+					// hit_records[index].data = {
+					// 	.indices = reinterpret_cast<uint3*>(models[m].d_index),
+					// 	.vertices = reinterpret_cast<float3*>(models[m].d_vertex),
+					// 	.normals = reinterpret_cast<float3*>(models[m].d_normal)
+					// };
 					break;
 				}
 				
