@@ -41,8 +41,6 @@ template <> struct SbtRecord<void> {
 	__align__(OPTIX_SBT_RECORD_ALIGNMENT) char header[OPTIX_SBT_RECORD_HEADER_SIZE];
 };
 
-#define MAX_TRACING_DEPTH 10
-
 
 
 char * readFile(char const * path, int & length)
@@ -78,7 +76,7 @@ int main()
 			printf("[(%d)%s]\t\t%s\n", level, tag, message);
 		};
 		options.logCallbackLevel = 3;
-		options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
+		// options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
 		OPTIX_CALL(optixDeviceContextCreate(cu_context, &options, &context));
 	}
 
@@ -86,7 +84,7 @@ int main()
 	OptixPipelineCompileOptions pipeline_comp_options = {
 		.usesMotionBlur = false,
 		.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING,
-		.numPayloadValues = 3, // change to three when using structered payload
+		.numPayloadValues = 4, // change to three when using structered payload
 		.numAttributeValues = 2,
 		.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE,
 		.pipelineLaunchParamsVariableName = "params"
@@ -212,11 +210,21 @@ int main()
 
 	/* Prepare accelerated structures. */
 	
-	const char * files[] = {
-		"resources/teapot.obj",
-		"resources/floor.obj",
+	const struct Description {
+		char * path;
+		float3 color;
+		float M;
+		float R;
+	} descriptions[] = {
+		// {"resources/sphere.obj", make_float3(1, 1, 1), 0, 0},
+		{"resources/floor.obj", make_float3(0, .6, .1), 0, 1},
+		{"resources/pillar.obj", make_float3(.1, .2, .6), .2, .6},
+		{"resources/room.obj", make_float3(1,1,1), 0, 1},
+		{"resources/table.obj", make_float3(.1,.1,0), .3, 0},
+		{"resources/tablelegs.obj", make_float3(0,0,0), 0, 1},
+		{"resources/light.obj", make_float3(.6,.6,.6), .9, .1},
 	};
-	const int model_count = sizeof(files) / sizeof(*files);
+	const int model_count = sizeof(descriptions) / sizeof(*descriptions);
 
 	struct {
 		CUdeviceptr d_index;
@@ -229,19 +237,21 @@ int main()
 	OptixTraversableHandle tlas_handle;  {
 		const uint32_t input_flags[] = { OPTIX_GEOMETRY_FLAG_NONE };
 
+		#define GRASS_COUNT 10000
+		// OptixInstance instances[model_count + GRASS_COUNT];
 		OptixInstance instances[model_count];
 		for (uint m = 0; m < model_count; ++m) {
 			// Load scene
 			Assimp::Importer importer;
 			const aiScene * scene = importer.ReadFile(
-				files[m],
+				descriptions[m].path,
 				aiProcess_Triangulate | aiProcess_JoinIdenticalVertices
 				| aiProcess_GenNormals | aiProcess_OptimizeMeshes
 				| aiProcess_PreTransformVertices
 			);
 			if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE)
 					|| !scene->mRootNode) {
-				fprintf(stderr, "[Error] Failed to load '%s'.\n", files[m]);
+				fprintf(stderr, "[Error] Failed to load '%s'.\n", descriptions[m].path);
 				exit(1);
 			}
 
@@ -341,11 +351,28 @@ int main()
 				1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0
 			};
 			memcpy(instances[m].transform, transform, sizeof(transform));
+
+			// if (m == 3) {
+			// 	for (int i = model_count; i < model_count + GRASS_COUNT; ++i) {
+			// 		instances[i] = {
+			// 			.instanceId = 0,
+			// 			.sbtOffset = m,
+			// 			.visibilityMask = 255,
+			// 			.flags = OPTIX_INSTANCE_FLAG_NONE,
+			// 			.traversableHandle = gas_handle
+			// 		};
+			// 		float transform[12] = {
+			// 			1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0
+			// 		};
+			// 		transform[3] = 40 * (float)rand() / (float)RAND_MAX - 20;
+			// 		transform[11] = 40 * (float)rand() / (float)RAND_MAX - 20;
+			// 		transform[5] = (float)rand() / (float)RAND_MAX + 1.2;
+			// 		memcpy(instances[i].transform, transform, sizeof(transform));
+			// 	}
+			// }
 		}
 
 		// Allocate memory for the build
-		
-		
 		CUdeviceptr d_instances;
 		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_instances), sizeof(instances)));
 		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_instances), &instances, sizeof(instances),
@@ -356,6 +383,7 @@ int main()
 			.instanceArray = {
 				.instances = d_instances,
 				.numInstances = model_count
+				// .numInstances = model_count + GRASS_COUNT
 			}
 		};
 		OptixAccelBuildOptions accel_options = {
@@ -405,23 +433,19 @@ int main()
 					hit_records[index].data = {
 						.indices = reinterpret_cast<uint3*>(models[m].d_index),
 						.vertices = reinterpret_cast<float3*>(models[m].d_vertex),
-						.normals = reinterpret_cast<float3*>(models[m].d_normal)
+						.normals = reinterpret_cast<float3*>(models[m].d_normal),
+						.color = descriptions[m].color,
+						.metallic = descriptions[m].M,
+						.roughness = descriptions[m].R
 					};
 					break;
 				case RT_SHADOW:
 					OPTIX_CALL(optixSbtRecordPackHeader(shadow_hit_program, hit_records + index));
 					hit_records[index].data = {};
-					// hit_records[index].data = {
-					// 	.indices = reinterpret_cast<uint3*>(models[m].d_index),
-					// 	.vertices = reinterpret_cast<float3*>(models[m].d_vertex),
-					// 	.normals = reinterpret_cast<float3*>(models[m].d_normal)
-					// };
 					break;
 				}
 				
 			}
-			hit_records[r + RT_COUNT * 0].data.color = make_float3(.8, .8, .8);
-			hit_records[r + RT_COUNT * 1].data.color = make_float3(.1, .4, 1.0);
 		}
 		
 		// Allocate record on GPU and copy data.
@@ -453,7 +477,7 @@ int main()
 	}
 
 	uchar4 * d_render_buffer = nullptr;
-	const size_t output_width = 800, output_height = 600;
+	const size_t output_width = 400, output_height = 300;
 	const size_t output_count = output_width * output_height;
 	const size_t output_size = output_count * sizeof(uchar4);
 	CUDA_CALL(cudaMalloc(reinterpret_cast<void **>(&d_render_buffer), output_size));

@@ -15,6 +15,8 @@ struct HitGroupData {
     float3 * vertices;
     float3 * normals;
     float3 color;
+    float metallic;
+    float roughness;
 };
 
 enum RayType {
@@ -29,10 +31,20 @@ enum MissType {
     MT_COUNT
 };
 
+
+#define MAX_TRACING_DEPTH 3
+
 /* Math extensions */
 inline __host__ __device__
 float3 operator+(const float3& a, const float3& b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+inline __host__ __device__
+float3& operator+=(float3& a, float3 b) {
+    a.x += b.x;
+    a.y += b.y;
+    a.z += b.z;
+    return a;
 }
 inline __host__ __device__
 float3 operator-(const float3& a, const float3& b) {
@@ -66,6 +78,10 @@ float3 normalized(const float3& v) {
 inline __host__ __device__
 float dot(const float3& a, const float3& b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+inline __host__ __device__
+float3 cross(const float3& a, const float3& b) {
+    return make_float3(a.y * b.z - a.z * b.y, -(a.x * b.z - a.z * b.x), a.x * b.y - a.y * b.x);
 }
 
 #endif
