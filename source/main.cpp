@@ -78,6 +78,7 @@ int main()
 			printf("[(%d)%s]\t\t%s\n", level, tag, message);
 		};
 		options.logCallbackLevel = 3;
+		options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
 		OPTIX_CALL(optixDeviceContextCreate(cu_context, &options, &context));
 	}
 
@@ -168,63 +169,10 @@ int main()
 			state_stack_size, continuation_stack_size, 2));
 	}
 
-	/* Set up shader binding table. */
-	// Have closest hit include the geometries index, vertex, normal info
-	// they should all share a pointer to a list of area lights.
-	OptixShaderBindingTable sbt = {}; {
-		/* Raygen record. */
-		// Create record on Host.
-		SbtRecord<void> raygen_record = {};
-		OPTIX_CALL(optixSbtRecordPackHeader(raygen_program_group, &raygen_record));
-
-		// Allocate record on GPU and copy data.
-		CUdeviceptr d_raygen_record;
-		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_raygen_record), sizeof(raygen_record)));
-		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_raygen_record), &raygen_record,
-			sizeof(raygen_record), cudaMemcpyHostToDevice));
-
-
-		/* Hit record. */
-		// Create record on Host.
-		SbtRecord<void> hit_record = {};
-		OPTIX_CALL(optixSbtRecordPackHeader(hit_program_group, &hit_record));
-
-		// Allocate record on GPU and copy data.
-		CUdeviceptr d_hit_record;
-		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_hit_record), sizeof(hit_record)));
-		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_hit_record), &hit_record, 1,
-			cudaMemcpyHostToDevice));
-
-		/* Miss record. */
-		// Create record on GPU.
-		SbtRecord<void> miss_record = {};
-		OPTIX_CALL(optixSbtRecordPackHeader(miss_program_group, &miss_record))
-
-		// Create record on Host and copy to GPU.
-		CUdeviceptr d_miss_record;
-		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_miss_record), sizeof(miss_record)));
-		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_miss_record), &miss_record,
-			sizeof(miss_record), cudaMemcpyHostToDevice));
-
-		/* Assign records to the binding table. */
-		sbt.raygenRecord = d_raygen_record;
-		sbt.hitgroupRecordBase = d_hit_record;
-		sbt.hitgroupRecordStrideInBytes = sizeof(hit_record);
-		sbt.hitgroupRecordCount = 1;
-		sbt.missRecordBase = d_miss_record;
-		sbt.missRecordStrideInBytes = sizeof(miss_record);
-		sbt.missRecordCount = 1;
-	}
-
-	uchar4 * d_render_buffer = nullptr;
-	const size_t output_width = 800, output_height = 600;
-	const size_t output_count = output_width * output_height;
-	const size_t output_size = output_count * sizeof(uchar4);
-	CUDA_CALL(cudaMalloc(reinterpret_cast<void **>(&d_render_buffer), output_size));
 
 	/* Prepare accelerated structures. */
 	CUdeviceptr d_traversable_mem;
-	OptixTraversableHandle traversable_handle;
+	OptixTraversableHandle gas_handle;
 
 	const char * files[] = {
 		"resources/teapot.obj",
@@ -331,11 +279,111 @@ int main()
 		// Build the structure
 		OPTIX_CALL(optixAccelBuild(context, 0, &options, inputs, model_count,
 			d_temp_mem, buffer_sizes.tempSizeInBytes, d_traversable_mem,
-			buffer_sizes.outputSizeInBytes, &traversable_handle, nullptr, 0));
+			buffer_sizes.outputSizeInBytes, &gas_handle, nullptr, 0));
 
 		// Cleanup
 		CUDA_CALL(cudaFree(reinterpret_cast<void *>(d_temp_mem)));
 	}
+
+	// Build TLAS ontop of GAS
+	CUdeviceptr d_tlas_output_buffer;
+	OptixTraversableHandle tlas_handle; {
+		OptixInstance instance = {};
+		instance.traversableHandle = gas_handle;
+		instance.instanceId = 0;
+		instance.sbtOffset = 0;
+		instance.visibilityMask = 255;
+		instance.flags = OPTIX_INSTANCE_FLAG_NONE;
+
+		float transform[12] = {
+			1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0
+		};
+		memcpy(instance.transform, transform, sizeof(transform));
+
+		CUdeviceptr d_instances;
+		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_instances), sizeof(instance)));
+		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_instances), &instance, sizeof(instance),
+			cudaMemcpyHostToDevice));
+
+		OptixBuildInput tlas_input = {
+			.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES,
+			.instanceArray = {
+				.instances = d_instances,
+				.numInstances = 1
+			}
+		};
+		OptixAccelBuildOptions accel_options = {
+			.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION,
+			.operation = OPTIX_BUILD_OPERATION_BUILD
+		};
+
+		OptixAccelBufferSizes buffer_sizes;
+		optixAccelComputeMemoryUsage(
+			context, &accel_options, &tlas_input, 1, &buffer_sizes
+		);
+		CUdeviceptr d_tmp_buffer;
+		cudaMalloc(reinterpret_cast<void**>(&d_tmp_buffer), buffer_sizes.tempSizeInBytes);
+		cudaMalloc(reinterpret_cast<void**>(&d_tlas_output_buffer), buffer_sizes.outputSizeInBytes);
+		optixAccelBuild(context, 0, &accel_options, &tlas_input, 1, d_tmp_buffer, buffer_sizes.tempSizeInBytes,
+			d_tlas_output_buffer, buffer_sizes.outputSizeInBytes, &tlas_handle, nullptr, 0);
+	}
+
+	/* Set up shader binding table. */
+	// Have closest hit include the geometries index, vertex, normal info
+	// they should all share a pointer to a list of area lights.
+	OptixShaderBindingTable sbt = {}; {
+		/* Raygen record. */
+		// Create record on Host.
+		SbtRecord<void> raygen_record = {};
+		OPTIX_CALL(optixSbtRecordPackHeader(raygen_program_group, &raygen_record));
+
+		// Allocate record on GPU and copy data.
+		CUdeviceptr d_raygen_record;
+		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_raygen_record), sizeof(raygen_record)));
+		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_raygen_record), &raygen_record,
+			sizeof(raygen_record), cudaMemcpyHostToDevice));
+
+
+		/* Hit record. */
+		// Create record on Host.
+		SbtRecord<void> hit_records[model_count] = {};
+		for (int m = 0; m < model_count; ++m) {
+			OPTIX_CALL(optixSbtRecordPackHeader(hit_program_group, hit_records + m));
+		}
+
+		// Allocate record on GPU and copy data.
+		CUdeviceptr d_hit_records;
+		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_hit_records), sizeof(hit_records)));
+		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_hit_records), &hit_records,
+			sizeof(hit_records), cudaMemcpyHostToDevice));
+
+		/* Miss record. */
+		// Create record on GPU.
+		SbtRecord<void> miss_record = {};
+		OPTIX_CALL(optixSbtRecordPackHeader(miss_program_group, &miss_record))
+
+		// Create record on Host and copy to GPU.
+		CUdeviceptr d_miss_record;
+		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_miss_record), sizeof(miss_record)));
+		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_miss_record), &miss_record,
+			sizeof(miss_record), cudaMemcpyHostToDevice));
+
+		/* Assign records to the binding table. */
+		sbt.raygenRecord = d_raygen_record;
+		sbt.hitgroupRecordBase = d_hit_records;
+		sbt.hitgroupRecordStrideInBytes = sizeof(hit_records[0]);
+		sbt.hitgroupRecordCount = 1;
+		sbt.missRecordBase = d_miss_record;
+		sbt.missRecordStrideInBytes = sizeof(miss_record);
+		sbt.missRecordCount = 1;
+	}
+
+	uchar4 * d_render_buffer = nullptr;
+	const size_t output_width = 800, output_height = 600;
+	const size_t output_count = output_width * output_height;
+	const size_t output_size = output_count * sizeof(uchar4);
+	CUDA_CALL(cudaMalloc(reinterpret_cast<void **>(&d_render_buffer), output_size));
+
 
 	/* Launch the application. */
 	puts("Launching application.");
@@ -351,7 +399,7 @@ int main()
 		params.cam_u = make_float3(1, 0, 0);
 		params.cam_v = make_float3(0, 1, 0);
 		params.cam_w = normalized(make_float3(0, -1, 2));
-		params.handle = traversable_handle;
+		params.handle = tlas_handle;
 
 
 		CUdeviceptr d_params;
@@ -383,6 +431,7 @@ int main()
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(sbt.hitgroupRecordBase)));
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(sbt.missRecordBase)));
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(d_traversable_mem)));
+		CUDA_CALL(cudaFree(reinterpret_cast<void*>(d_tlas_output_buffer)));
 		for (auto& model : models) {
 			CUDA_CALL(cudaFree(reinterpret_cast<void *>(model.index)));
 			CUDA_CALL(cudaFree(reinterpret_cast<void *>(model.vertex)));

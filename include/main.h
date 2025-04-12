@@ -13,6 +13,7 @@ struct Params {
 struct HitGroupData {
     uint3 * indices;
     float3 * vertices;
+    float3 * normals;
     float3 color;
 };
 
