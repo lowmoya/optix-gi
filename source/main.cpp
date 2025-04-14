@@ -211,18 +211,22 @@ int main()
 	/* Prepare accelerated structures. */
 	
 	const struct Description {
-		char * path;
+		const char * path;
 		float3 color;
 		float M;
 		float R;
+		float transform[12];
 	} descriptions[] = {
-		// {"resources/sphere.obj", make_float3(1, 1, 1), 0, 0},
-		{"resources/floor.obj", make_float3(0, .6, .1), 0, 1},
-		{"resources/pillar.obj", make_float3(.1, .2, .6), .2, .6},
-		{"resources/room.obj", make_float3(1,1,1), 0, 1},
-		{"resources/table.obj", make_float3(.1,.1,0), .3, 0},
-		{"resources/tablelegs.obj", make_float3(0,0,0), 0, 1},
-		{"resources/light.obj", make_float3(.6,.6,.6), .9, .1},
+		{"resources/floor.obj", make_float3(0, .6, .1), 0, 1,
+			{1, 0, 0, 0,	0, 1, 0, 0, 	0, 0, 1, 0}},
+		{"resources/room.obj", make_float3(1,1,1), 0, 1,
+			{1, 0, 0, 0,	0, 1, 0, 0, 	0, 0, 1, 0}},
+		{"resources/table_and_chairs.glb", make_float3(1,1,1), 0, 1,
+			{5, 0, 0, 0,	0, 5, 0, .7, 	0, 0, 5, 0}},
+		{"resources/retro_light.glb", make_float3(.6,.6,.6), .9, .1,
+			{.01, 0, 0, 0,	0, .01, 0, 6.7, 	0, 0, .01, 0}},
+		// {"resources/test.glb", make_float3(.6,.6,.6), .9, .1,
+		// 	{.01, 0, 0, 1,	0, .01, 0, 5, 	0, 0, .01, 0}},
 	};
 	const int model_count = sizeof(descriptions) / sizeof(*descriptions);
 
@@ -347,11 +351,8 @@ int main()
 				.flags = OPTIX_INSTANCE_FLAG_NONE,
 				.traversableHandle = gas_handle
 			};
-			float transform[12] = {
-				1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0
-			};
-			memcpy(instances[m].transform, transform, sizeof(transform));
-
+			memcpy(instances[m].transform, descriptions[m].transform, sizeof(instances[m].transform));
+			
 			// if (m == 3) {
 			// 	for (int i = model_count; i < model_count + GRASS_COUNT; ++i) {
 			// 		instances[i] = {
@@ -493,9 +494,9 @@ int main()
 		params.image = d_render_buffer;
 		params.image_width = output_width;
 		params.image_height = output_height;
-		params.cam_eye = make_float3(0, 4, -6);
+		params.cam_eye = make_float3(0, 6, -6);
 		params.cam_u = make_float3(1, 0, 0);
-		params.cam_v = make_float3(0, 1, 0);
+		params.cam_v = normalized(make_float3(0, 1, .1));
 		params.cam_w = normalized(make_float3(0, -1, 2));
 		params.handle = tlas_handle;
 

@@ -24,10 +24,10 @@ __global__ void __raygen__radiance()
     );
  
     /* Sample scene. */
-    unsigned int p0, p1, p2;
+    unsigned int p0, p1, p2, depth = 0;
     optixTrace(params.handle, ray_origin, ray_direction,
         0.0f, 1e16f, 0.0, OptixVisibilityMask(255), OPTIX_RAY_FLAG_NONE,
-        RT_RADIANCE, RT_COUNT, MT_RADIANCE, p0, p1, p2);
+        RT_RADIANCE, RT_COUNT, MT_RADIANCE, p0, p1, p2, depth);
         
 
     /* Write result */
@@ -104,7 +104,7 @@ __device__ float3 sampleHemisphereUniform(float3 normal, float u1, float u2) {
 
     return normalized(normal_u * x + normal_v * y + normal * z);
 }
-__constant__ uint32_t sobol_matrix[4][32] = {
+__constant__ __uint32_t sobol_matrix[4][32] = {
     // Dimension 0
     {
         0x80000000, 0x40000000, 0x20000000, 0x10000000,
@@ -128,8 +128,8 @@ __constant__ uint32_t sobol_matrix[4][32] = {
         0x00000018, 0x0000000C, 0x00000006, 0x00000003
     },
 };
-__device__ uint32_t sobol(uint32_t index, int dim) {
-    uint32_t result = 0;
+__device__ __uint32_t sobol(__uint32_t index, int dim) {
+    __uint32_t result = 0;
     for (int i = 0; i < 32; ++i) {
         if (index & (1u << i))
             result ^= sobol_matrix[dim][i];
@@ -156,42 +156,58 @@ __global__ void __closesthit__radiance()
     /* Direct lighting */
     struct {
         float3 position;
+        float3 width_dir;
+        float3 height_dir;
+        float width;
+        float height;
         float3 color;
         float intensity;
+        int samples;
     } lights[] = {
         {
             make_float3(-10, 10, 0),
+            make_float3(1, 0, 0), normalized(make_float3(.3, 1, 0)),
+            10, 10,
             make_float3(1.0, .64, .4),
-            400
+            900,
+            // 200
+            2
         },
         {
-            make_float3(0,8.2,0),
+            make_float3(0,6.9,0),
+            make_float3(1, 0, 0), make_float3(0, 0, 1),
+            .3, .3,
             make_float3(1.0, 1.0, 1.0),
-            30
+            40,
+            // 10
+            1
         }
     };
     const int light_count = sizeof(lights)/sizeof(*lights);
 
-
     float3 direct_color = make_float3(0, 0, 0);
     const float3 outgoing = -1 * optixGetWorldRayDirection();
     for (int i = 0; i < light_count; ++i) {
-        const float3 light = make_float3(-10, 10, 0);
-        const float3 incoming = lights[i].position - position;
-        const float incoming_mag = magnitude(incoming);
-        const float3 incoming_dir = incoming / incoming_mag;
+        for (int s = 0; s < lights[i].samples; ++s) {
+            const float3 sample = lights[i].position
+                + ((double)sobol(s, 0) / (double)__UINT32_MAX__) * lights[i].width_dir * lights[i].width
+                + ((double)sobol(s, 1) / (double)__UINT32_MAX__) * lights[i].height_dir * lights[i].height;
+            const float3 incoming = sample - position;
+            const float incoming_mag = magnitude(incoming);
+            const float3 incoming_dir = incoming / incoming_mag;
 
-        uint unobstructed = 0;
-        optixTrace(params.handle, position, incoming_dir, 0.001, incoming_mag, 0, OptixVisibilityMask(255),
-            OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT, RT_SHADOW, RT_COUNT, MT_SHADOW, unobstructed);
+            uint unobstructed = 0;
+            optixTrace(params.handle, position, incoming_dir, 0.001, incoming_mag, 0, OptixVisibilityMask(255),
+                OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT, RT_SHADOW, RT_COUNT, MT_SHADOW, unobstructed);
 
-        if (!unobstructed)
-            continue;
-        
-        float3 brdf_val = brdf(incoming_dir, outgoing, normal, group_data.roughness, group_data.metallic,
-            group_data.color);
-        direct_color += lights[i].intensity * lights[i].color * brdf_val * dot(normal, incoming_dir)
-            / (incoming_mag * incoming_mag);
+            if (!unobstructed)
+                continue;
+            
+            float3 brdf_val = brdf(incoming_dir, outgoing, normal, group_data.roughness, group_data.metallic,
+                group_data.color);
+            direct_color += lights[i].intensity * lights[i].color * brdf_val * dot(normal, incoming_dir)
+                / (incoming_mag * incoming_mag) / (float)lights[i].samples;
+        }
     }
 
     
@@ -199,24 +215,26 @@ __global__ void __closesthit__radiance()
     /* Indirect lighting */
     float3 indirect_color = make_float3(0,0,0);
     if (depth < MAX_TRACING_DEPTH - 1) {
-        const int samples = 70;
-        for (int s = 0; s < samples; ++s) {
+        // const int samples = 60;
+        const int samples = 10;
+        for (int s = 0; s < samples; ++s) { 
             uint next_depth = depth + 1;
             uint3 sample_color;
-            float3 sample_direction = sampleHemisphereUniform(normal, curand_uniform(&rand_state),
-                curand_uniform(&rand_state));
-            // float3 sample_direction = sampleHemisphereUniform(normal,
-            //     (double)sobol(s, 0) / (double)UINT32_MAX, (double)sobol(s, 1) / (double)UINT32_MAX);
+            // float3 sample_direction = -1 * sampleHemisphereUniform(normal, curand_uniform(&rand_state),
+            //     curand_uniform(&rand_state));
+            float3 sample_direction = sampleHemisphereUniform(normal,
+                (double)sobol(s, 0) / (double)__UINT32_MAX__, (double)sobol(s, 1) / (double)__UINT32_MAX__);
 
             optixTrace(params.handle, position, sample_direction, 0.001, 1e16, 0, OptixVisibilityMask(255),
                 OPTIX_RAY_FLAG_NONE, RT_RADIANCE, RT_COUNT, MT_RADIANCE, sample_color.x,
                 sample_color.y, sample_color.z, next_depth);
 
-            indirect_color += (1.0 / (float)samples)
+            indirect_color = indirect_color + (1.0 / (float)samples)
                 * brdf(sample_direction, outgoing, normal, group_data.roughness,
                     group_data.metallic, group_data.color)
                 * make_float3(__int_as_float(sample_color.x), __int_as_float(sample_color.y),
                     __int_as_float(sample_color.z))
+                * make_float3(1, 1, 1)
                 * dot(sample_direction,normal);
         }
     }

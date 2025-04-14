@@ -39,24 +39,23 @@ IF=$(INCLUDES:%=-I%)
 # -include $(DEPFILES)
 # endif
 test: $(EXE)
-	@echo "\n>- Starting Application"
+	@echo -e '\n=> Starting Application'
 	$(EXE)
 clean:
-	@echo "\n>- Removing Generated Content"
+	@echo -e '\n=> Removing Generated Content'
 	rm -rf $(BIN) $(EXE) *.png
 
 
 # File tasks
 $(EXE):  $(PTXFILES) $(OBJFILES)
-	@rm -f .compmark
-	@echo "\n>- Linking Executable"
-	@echo $^
+	@rm -f .compmark .depmark .ptxmark
+	@echo -e '\n=> Linking Executable'
 	$(CC) $(OBJFILES) -o $@ $(LDF) $(LF)
 
 # Generative tasks
 $(SRCDEPOUT)%.d: $(SRC)%.cpp
 	@if [ ! -f .depmark ]; then \
-		echo "\n>- Collecting Dependencies"; \
+		echo -e '\n=> Collecting Dependencies'; \
 		rm -f .compmark; \
 		touch .depmark; \
 	fi
@@ -65,7 +64,7 @@ $(SRCDEPOUT)%.d: $(SRC)%.cpp
 
 $(SRCOUT)%.o: $(SRC)%.cpp $(SRCDEPOUT)%.d
 	@if [ ! -f .compmark ]; then \
-		echo "\n>- Compiling Sources"; \
+		echo -e '\n=> Compiling Sources'; \
 		rm -f .depmark; \
 		touch .compmark; \
 	fi
@@ -75,22 +74,22 @@ $(SRCOUT)%.o: $(SRC)%.cpp $(SRCDEPOUT)%.d
 
 $(DEVDEPOUT)%.d: $(DEV)%.cu
 	@if [ ! -f .depmark ]; then \
-		echo "\n>- Collecting Dependencies"; \
+		echo -e '=> Collecting Dependencies'; \
 		rm -f .compmark; \
 		touch .depmark; \
 	fi
 
 	@mkdir -p $(dir $@)
-	$(NVCC) $(IF) $< -MM -MT $(@:$(DEVDEPOUT)%.d=$(DEVOUT)%.ptx) -MF $@
+	$(NVCC) $(IF) $< -MM -MT $(@:$(DEVDEPOUT)%.d=$(DEVOUT)%.ptx) -MF $@ -Wno-deprecated-gpu-targets
 
 $(DEVOUT)%.ptx: $(DEV)%.cu $(DEVDEPOUT)%.d
-	@if [ ! -f .compmark ]; then \
-		echo "\n>- Compiling PTX Files"; \
+	@if [ ! -f .ptxmark ]; then \
+		echo  -e '\n=> Compiling PTX Files'; \
 		rm -f .depmark; \
-		touch .compmark; \
+		touch .ptxmark; \
 	fi
 
 	@mkdir -p $(dir $@)
-	$(NVCC) -ptx $(IF) $< -o $@
+	$(NVCC) -ptx $(IF) $< -o $@ -Wno-deprecated-gpu-targets
 
 -include  $(CUDEPFILES) $(SRCDEPFILES)

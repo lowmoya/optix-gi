@@ -32,7 +32,7 @@ enum MissType {
 };
 
 
-#define MAX_TRACING_DEPTH 3
+#define MAX_TRACING_DEPTH 2
 
 /* Math extensions */
 inline __host__ __device__
