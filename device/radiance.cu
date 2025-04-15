@@ -178,7 +178,7 @@ __global__ void __closesthit__radiance()
             make_float3(1, 0, 0), make_float3(0, 0, 1),
             .3, .3,
             make_float3(1.0, 1.0, 1.0),
-            40,
+            60,
             // 10
             1
         }
@@ -216,7 +216,7 @@ __global__ void __closesthit__radiance()
     float3 indirect_color = make_float3(0,0,0);
     if (depth < MAX_TRACING_DEPTH - 1) {
         // const int samples = 60;
-        const int samples = 10;
+        const int samples = 100;
         for (int s = 0; s < samples; ++s) { 
             uint next_depth = depth + 1;
             uint3 sample_color;

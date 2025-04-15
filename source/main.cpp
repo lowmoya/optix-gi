@@ -212,165 +212,191 @@ int main()
 	
 	const struct Description {
 		const char * path;
-		float3 color;
-		float M;
-		float R;
 		float transform[12];
 	} descriptions[] = {
-		{"resources/floor.obj", make_float3(0, .6, .1), 0, 1,
+		{"resources/floor.obj",
 			{1, 0, 0, 0,	0, 1, 0, 0, 	0, 0, 1, 0}},
-		{"resources/room.obj", make_float3(1,1,1), 0, 1,
+		{"resources/room.obj",
 			{1, 0, 0, 0,	0, 1, 0, 0, 	0, 0, 1, 0}},
-		{"resources/table_and_chairs.glb", make_float3(1,1,1), 0, 1,
+		{"resources/simple_dining_table.glb",
 			{5, 0, 0, 0,	0, 5, 0, .7, 	0, 0, 5, 0}},
-		{"resources/retro_light.glb", make_float3(.6,.6,.6), .9, .1,
+		{"resources/retro_light.glb",
 			{.01, 0, 0, 0,	0, .01, 0, 6.7, 	0, 0, .01, 0}},
 		// {"resources/test.glb", make_float3(.6,.6,.6), .9, .1,
 		// 	{.01, 0, 0, 1,	0, .01, 0, 5, 	0, 0, .01, 0}},
 	};
-	const int model_count = sizeof(descriptions) / sizeof(*descriptions);
+	const int file_count = sizeof(descriptions) / sizeof(*descriptions);
 
-	struct {
+	struct Model {
 		CUdeviceptr d_index;
 		CUdeviceptr d_vertex;
 		CUdeviceptr d_normal;
 		CUdeviceptr d_gas_mem;
-	} models[model_count];
+		int material_id;
+	};
+#define MAX_MODELS 60
+	Model models[MAX_MODELS];
+	int model_count = 0;
+
+
+	struct Material {
+		float roughness;
+		float metallic;
+		float3 color;
+	};
+#define MAX_MATERIALS 60
+	Material materials[MAX_MATERIALS];
+	materials[0] = {
+		.roughness = 1,
+		.metallic = 0
+	};
+	int material_count = 1;
+
 
 	CUdeviceptr d_tlas_mem;
 	OptixTraversableHandle tlas_handle;  {
 		const uint32_t input_flags[] = { OPTIX_GEOMETRY_FLAG_NONE };
 
-		#define GRASS_COUNT 10000
-		// OptixInstance instances[model_count + GRASS_COUNT];
-		OptixInstance instances[model_count];
-		for (uint m = 0; m < model_count; ++m) {
+			
+
+		OptixInstance instances[MAX_MODELS];
+		for (uint f = 0; f < file_count; ++f) {
 			// Load scene
 			Assimp::Importer importer;
 			const aiScene * scene = importer.ReadFile(
-				descriptions[m].path,
+				descriptions[f].path,
 				aiProcess_Triangulate | aiProcess_JoinIdenticalVertices
 				| aiProcess_GenNormals | aiProcess_OptimizeMeshes
 				| aiProcess_PreTransformVertices
 			);
 			if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE)
 					|| !scene->mRootNode) {
-				fprintf(stderr, "[Error] Failed to load '%s'.\n", descriptions[m].path);
+				fprintf(stderr, "[Error] Failed to load '%s'.\n", descriptions[f].path);
 				exit(1);
 			}
 
-			// Measure counts
-			uint vertex_count = 0, face_count = 0;
-			for (int mi = 0; mi < scene->mNumMeshes; ++mi) {
-				aiMesh * mesh = scene->mMeshes[mi];
-				vertex_count += mesh->mNumVertices;
+			// Load the materials
+			int other_scene_materials = material_count;
+			for (int mi = 0; mi < scene->mNumMaterials; ++mi) {
+				materials[material_count] = {
+					.roughness = 1.0,
+					.metallic = 0.0
+				};
+				
+				aiMaterial * ref_material = scene->mMaterials[mi];
+				ref_material->Get("GLTF_PBRMETALLICROUGHNESS_ROUGHNESS_FACTOR", 0, 0,
+					materials[material_count].roughness);
+				ref_material->Get("GLTF_PBRMETALLICROUGHNESS_METALLIC_FACTOR", 0, 0,
+					materials[material_count].metallic);
 
-				for (int fi = 0; fi < mesh->mNumFaces; ++fi)
-					if (mesh->mFaces[fi].mNumIndices == 3)
-						++face_count;
+				aiColor3D color(1.0, 1.0, 1.0);
+				ref_material->Get("GLTF_PBRMETTALLICROUGHNESS_BASE_COLOR_FACTOR", 0, 0, color);
+				materials[material_count].color = make_float3(color.r, color.g, color.b);
+
+				
+				++material_count;
+				assert(material_count != MAX_MATERIALS);
 			}
 
-			// Read data
-			float3 * vertices = (float3 *)malloc(vertex_count * sizeof(float3));
-			float3 * normals = (float3 *)malloc(vertex_count * sizeof(float3));
-			uint * indices = (uint *)malloc(face_count * 3 * sizeof(uint));
-			uint vertex_offset = 0, index_offset = 0;
+			// Load each mesh into an instance
 			for (int mi = 0; mi < scene->mNumMeshes; ++mi) {
 				aiMesh * mesh = scene->mMeshes[mi];
-				memcpy(vertices + vertex_offset, mesh->mVertices, mesh->mNumVertices * sizeof(float3));
-				memcpy(normals + vertex_offset, mesh->mNormals, mesh->mNumVertices * sizeof(float3));
-				vertex_offset += mesh->mNumVertices;
+				models[model_count].material_id = other_scene_materials + mesh->mMaterialIndex;
 
-				for (int fi = 0; fi < mesh->mNumFaces; ++fi) {
-					aiFace * face = mesh->mFaces + fi;
-					if (face->mNumIndices == 3) {
-						memcpy(indices + index_offset, face->mIndices, 3 * sizeof(uint));
-						index_offset += 3;
+				uint vertex_count = mesh->mNumVertices, face_count = mesh->mNumFaces;
+				
+				// Read data
+				uint3 * indices =   (uint3 *)malloc(face_count * sizeof(uint3));
+				float3 * vertices = (float3 *)malloc(vertex_count * sizeof(float3));
+				float3 * normals =  (float3 *)malloc(vertex_count * sizeof(float3));
+
+				for (int f = 0; f < face_count; ++f) {
+					assert(mesh->mFaces[f].mNumIndices == 3);
+					indices[f] = make_uint3(
+						mesh->mFaces[f].mIndices[0],
+						mesh->mFaces[f].mIndices[1],
+						mesh->mFaces[f].mIndices[2]
+					);
+				}
+
+				for (int v = 0; v < vertex_count; ++v) {
+					vertices[v] = make_float3(
+						mesh->mVertices[v].x,
+						mesh->mVertices[v].y,
+						mesh->mVertices[v].z
+					);
+					normals[v] = make_float3(
+						mesh->mNormals[v].x,
+						mesh->mNormals[v].y,
+						mesh->mNormals[v].z
+					);
+				}
+
+				// Fill out build info
+				CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[model_count].d_index),
+					face_count * sizeof(uint3)));
+				CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[model_count].d_vertex),
+					vertex_count * sizeof(float3)));
+				CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[model_count].d_normal),
+					vertex_count * sizeof(float3)));
+
+				CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[model_count].d_index),
+					indices, face_count * sizeof(uint3), cudaMemcpyHostToDevice));
+				CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[model_count].d_vertex),
+					vertices, vertex_count * sizeof(float3), cudaMemcpyHostToDevice));
+				CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[model_count].d_normal),
+					normals, vertex_count * sizeof(float3), cudaMemcpyHostToDevice));
+				
+				free(indices);
+				free(vertices);
+				free(normals);
+				
+				OptixBuildInput input = {
+					.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES,
+					.triangleArray = {
+						.vertexBuffers = &models[model_count].d_vertex,
+						.numVertices = vertex_count,
+						.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3,
+						.indexBuffer = models[model_count].d_index,
+						.numIndexTriplets = face_count,
+						.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3,
+						.flags = input_flags,
+						.numSbtRecords = 1
 					}
-				}
-			}
+				};
 
-			// Fill out build info
-
-			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[m].d_index),
-				face_count * sizeof(uint3)));
-			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[m].d_vertex),
-				vertex_count * sizeof(float3)));
-			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[m].d_normal),
-				vertex_count * sizeof(float3)));
-
-			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[m].d_index),
-				indices, face_count * sizeof(uint3), cudaMemcpyHostToDevice));
-			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[m].d_vertex),
-				vertices, vertex_count * sizeof(float3), cudaMemcpyHostToDevice));
-			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[m].d_normal),
-				normals, vertex_count * sizeof(float3), cudaMemcpyHostToDevice));
+				OptixAccelBuildOptions options = {
+					.buildFlags = OPTIX_BUILD_FLAG_NONE,
+					.operation = OPTIX_BUILD_OPERATION_BUILD
+				};
+				OptixAccelBufferSizes buffer_sizes;
+				optixAccelComputeMemoryUsage(context, &options, &input, 1, &buffer_sizes);	
 			
-			free(indices);
-			free(vertices);
-			free(normals);
-			
-			OptixBuildInput input = {
-				.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES,
-				.triangleArray = {
-					.vertexBuffers = &models[m].d_vertex,
-					.numVertices = vertex_count,
-					.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3,
-					.indexBuffer = models[m].d_index,
-					.numIndexTriplets = face_count,
-					.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3,
-					.flags = input_flags,
-					.numSbtRecords = 1
-				}
-			};
-
-			OptixAccelBuildOptions options = {
-				.buildFlags = OPTIX_BUILD_FLAG_NONE,
-				.operation = OPTIX_BUILD_OPERATION_BUILD
-			};
-			OptixAccelBufferSizes buffer_sizes;
-			optixAccelComputeMemoryUsage(context, &options, &input, 1, &buffer_sizes);	
+				CUdeviceptr d_tmp_mem;
+				CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_tmp_mem), buffer_sizes.tempSizeInBytes));
+				CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[model_count].d_gas_mem), buffer_sizes.outputSizeInBytes));
 		
-			CUdeviceptr d_tmp_mem;
-			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_tmp_mem), buffer_sizes.tempSizeInBytes));
-			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[m].d_gas_mem), buffer_sizes.outputSizeInBytes));
-	
-			// Build the structure
-			OptixTraversableHandle gas_handle;
-			OPTIX_CALL(optixAccelBuild(context, 0, &options, &input, 1,
-				d_tmp_mem, buffer_sizes.tempSizeInBytes, models[m].d_gas_mem,
-				buffer_sizes.outputSizeInBytes, &gas_handle, nullptr, 0));
-	
-			CUDA_CALL(cudaFree(reinterpret_cast<void *>(d_tmp_mem)));
+				// Build the structure
+				OptixTraversableHandle gas_handle;
+				OPTIX_CALL(optixAccelBuild(context, 0, &options, &input, 1,
+					d_tmp_mem, buffer_sizes.tempSizeInBytes, models[model_count].d_gas_mem,
+					buffer_sizes.outputSizeInBytes, &gas_handle, nullptr, 0));
+		
+				CUDA_CALL(cudaFree(reinterpret_cast<void *>(d_tmp_mem)));
 
 
-			instances[m] = {
-				.instanceId = 0,
-				.sbtOffset = m,
-				.visibilityMask = 255,
-				.flags = OPTIX_INSTANCE_FLAG_NONE,
-				.traversableHandle = gas_handle
-			};
-			memcpy(instances[m].transform, descriptions[m].transform, sizeof(instances[m].transform));
-			
-			// if (m == 3) {
-			// 	for (int i = model_count; i < model_count + GRASS_COUNT; ++i) {
-			// 		instances[i] = {
-			// 			.instanceId = 0,
-			// 			.sbtOffset = m,
-			// 			.visibilityMask = 255,
-			// 			.flags = OPTIX_INSTANCE_FLAG_NONE,
-			// 			.traversableHandle = gas_handle
-			// 		};
-			// 		float transform[12] = {
-			// 			1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0
-			// 		};
-			// 		transform[3] = 40 * (float)rand() / (float)RAND_MAX - 20;
-			// 		transform[11] = 40 * (float)rand() / (float)RAND_MAX - 20;
-			// 		transform[5] = (float)rand() / (float)RAND_MAX + 1.2;
-			// 		memcpy(instances[i].transform, transform, sizeof(transform));
-			// 	}
-			// }
+				instances[model_count] = {
+					.instanceId = 0,
+					.sbtOffset = (uint)model_count,
+					.visibilityMask = 255,
+					.flags = OPTIX_INSTANCE_FLAG_NONE,
+					.traversableHandle = gas_handle
+				};
+				memcpy(instances[model_count].transform, descriptions[f].transform, sizeof(instances[model_count].transform));
+				
+				model_count++;
+				assert(model_count != MAX_MODELS);
+			}
 		}
 
 		// Allocate memory for the build
@@ -383,8 +409,7 @@ int main()
 			.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES,
 			.instanceArray = {
 				.instances = d_instances,
-				.numInstances = model_count
-				// .numInstances = model_count + GRASS_COUNT
+				.numInstances = (uint)model_count
 			}
 		};
 		OptixAccelBuildOptions accel_options = {
@@ -435,9 +460,9 @@ int main()
 						.indices = reinterpret_cast<uint3*>(models[m].d_index),
 						.vertices = reinterpret_cast<float3*>(models[m].d_vertex),
 						.normals = reinterpret_cast<float3*>(models[m].d_normal),
-						.color = descriptions[m].color,
-						.metallic = descriptions[m].M,
-						.roughness = descriptions[m].R
+						.color = make_float3(1, 1, 1),
+						.metallic = materials[models[m].material_id].metallic,
+						.roughness = materials[models[m].material_id].roughness
 					};
 					break;
 				case RT_SHADOW:
@@ -478,7 +503,7 @@ int main()
 	}
 
 	uchar4 * d_render_buffer = nullptr;
-	const size_t output_width = 400, output_height = 300;
+	const size_t output_width = 800, output_height = 600;
 	const size_t output_count = output_width * output_height;
 	const size_t output_size = output_count * sizeof(uchar4);
 	CUDA_CALL(cudaMalloc(reinterpret_cast<void **>(&d_render_buffer), output_size));
@@ -530,11 +555,11 @@ int main()
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(sbt.hitgroupRecordBase)));
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(sbt.missRecordBase)));
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(d_tlas_mem)));
-		for (auto& model : models) {
-			CUDA_CALL(cudaFree(reinterpret_cast<void *>(model.d_index)));
-			CUDA_CALL(cudaFree(reinterpret_cast<void *>(model.d_vertex)));
-			CUDA_CALL(cudaFree(reinterpret_cast<void *>(model.d_normal)));
-			CUDA_CALL(cudaFree(reinterpret_cast<void*>(model.d_gas_mem)));
+		for (int i = 0; i < model_count; ++i) {
+			CUDA_CALL(cudaFree(reinterpret_cast<void *>(models[i].d_index)));
+			CUDA_CALL(cudaFree(reinterpret_cast<void *>(models[i].d_vertex)));
+			CUDA_CALL(cudaFree(reinterpret_cast<void *>(models[i].d_normal)));
+			CUDA_CALL(cudaFree(reinterpret_cast<void *>(models[i].d_gas_mem)));
 		}
 
 		OPTIX_CALL(optixPipelineDestroy(pipeline));
