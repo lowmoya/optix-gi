@@ -146,12 +146,15 @@ __global__ void __closesthit__radiance()
     
     
     const uint3 indices = group_data.indices[optixGetPrimitiveIndex()];
-    const float3 position = optixHitObjectTransformPointFromObjectToWorldSpace((1 - bc.x - bc.y) * group_data.vertices[indices.x]
+    const float3 position = optixTransformPointFromObjectToWorldSpace((1 - bc.x - bc.y) * group_data.vertices[indices.x]
         + bc.x * group_data.vertices[indices.y]
         + bc.y * group_data.vertices[indices.z]);
-    const float3 normal = normalized(optixHitObjectTransformNormalFromWorldToObjectSpace((1 - bc.x - bc.y) * group_data.normals[indices.x]
+    const float3 normal = normalized(optixTransformNormalFromObjectToWorldSpace((1 - bc.x - bc.y) * group_data.normals[indices.x]
         + bc.x * group_data.normals[indices.y]
         + bc.y * group_data.normals[indices.z]));
+    const float2 uv = (1 - bc.x - bc.y) * group_data.uv[indices.x]
+        + bc.x * group_data.uv[indices.y]
+        + bc.y * group_data.uv[indices.z]; 
 
     /* Direct lighting */
     struct {
@@ -163,15 +166,16 @@ __global__ void __closesthit__radiance()
         float3 color;
         float intensity;
         int samples;
+        int sun;
     } lights[] = {
         {
-            make_float3(-10, 10, 0),
-            make_float3(1, 0, 0), normalized(make_float3(.3, 1, 0)),
+            normalized(make_float3(-1, 1, 0)),
+            make_float3(0, 0, 0), make_float3(0, 0, 0),
             10, 10,
             make_float3(1.0, .64, .4),
-            900,
-            // 200
-            2
+            3,
+            1,
+            1
         },
         {
             make_float3(0,6.9,0),
@@ -180,7 +184,8 @@ __global__ void __closesthit__radiance()
             make_float3(1.0, 1.0, 1.0),
             60,
             // 10
-            1
+            1,
+            0
         }
     };
     const int light_count = sizeof(lights)/sizeof(*lights);
@@ -189,20 +194,33 @@ __global__ void __closesthit__radiance()
     const float3 outgoing = -1 * optixGetWorldRayDirection();
     for (int i = 0; i < light_count; ++i) {
         for (int s = 0; s < lights[i].samples; ++s) {
-            const float3 sample = lights[i].position
-                + ((double)sobol(s, 0) / (double)__UINT32_MAX__) * lights[i].width_dir * lights[i].width
-                + ((double)sobol(s, 1) / (double)__UINT32_MAX__) * lights[i].height_dir * lights[i].height;
-            const float3 incoming = sample - position;
-            const float incoming_mag = magnitude(incoming);
-            const float3 incoming_dir = incoming / incoming_mag;
-
+            float incoming_mag;
+            float3 incoming_dir;
             uint unobstructed = 0;
-            optixTrace(params.handle, position, incoming_dir, 0.001, incoming_mag, 0, OptixVisibilityMask(255),
-                OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT, RT_SHADOW, RT_COUNT, MT_SHADOW, unobstructed);
+            if (!lights[i].sun) {
+                float3 sample = lights[i].position
+                    + ((double)sobol(s, 0) / (double)__UINT32_MAX__) * lights[i].width_dir * lights[i].width
+                    + ((double)sobol(s, 1) / (double)__UINT32_MAX__) * lights[i].height_dir * lights[i].height;
+                float3 incoming = sample - position;
+                incoming_mag = magnitude(incoming);
+                incoming_dir = incoming / incoming_mag;
+                optixTrace(params.handle, position, incoming_dir, 0.001, incoming_mag, 0, OptixVisibilityMask(255),
+                    OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT, RT_SHADOW, RT_COUNT, MT_SHADOW, unobstructed);
+            } else {
+                incoming_mag = 1;
+                incoming_dir = lights[i].position;
+                optixTrace(params.handle, position, incoming_dir, 0.001, 1e16, 0, OptixVisibilityMask(255),
+                    OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT, RT_SHADOW, RT_COUNT, MT_SHADOW, unobstructed);
+            }
+
 
             if (!unobstructed)
                 continue;
-            
+            float3 albedo;
+            if (group_data.width) {
+                uchar4 read = group_data.image[(int)(uv.y * group_data.height) * group_data.width + (int)(uv.x * group_data.width)];
+                albedo = make_float3((float)read.x / 255.0, (float)read.y / 255.0, (float)read.z / 255.0);
+            }
             float3 brdf_val = brdf(incoming_dir, outgoing, normal, group_data.roughness, group_data.metallic,
                 group_data.color);
             direct_color += lights[i].intensity * lights[i].color * brdf_val * dot(normal, incoming_dir)
@@ -215,8 +233,8 @@ __global__ void __closesthit__radiance()
     /* Indirect lighting */
     float3 indirect_color = make_float3(0,0,0);
     if (depth < MAX_TRACING_DEPTH - 1) {
-        // const int samples = 60;
-        const int samples = 100;
+        // const int samples = 200;
+        const int samples = 1;
         for (int s = 0; s < samples; ++s) { 
             uint next_depth = depth + 1;
             uint3 sample_color;
@@ -242,6 +260,7 @@ __global__ void __closesthit__radiance()
 
     /* Return color*/
     const float3 color = (direct_color + indirect_color);
+
     // scale color by the world rays distance
     optixSetPayload_0(__float_as_int(min(color.x, 1.0)));
     optixSetPayload_1(__float_as_int(min(color.y, 1.0)));

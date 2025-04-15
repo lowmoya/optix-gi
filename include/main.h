@@ -14,9 +14,13 @@ struct HitGroupData {
     uint3 * indices;
     float3 * vertices;
     float3 * normals;
+    float2 * uv;
     float3 color;
     float metallic;
     float roughness;
+    int width;
+    int height;
+    uchar4 * image;
 };
 
 enum RayType {
@@ -32,9 +36,21 @@ enum MissType {
 };
 
 
-#define MAX_TRACING_DEPTH 2
+#define MAX_TRACING_DEPTH 1
 
 /* Math extensions */
+inline __host__ __device__
+float2 operator*(float scalar, const float2& a) {
+    return make_float2(scalar * a.x, scalar * a.y);
+}
+inline __host__ __device__
+float2 operator*(const float2& a, float scalar) {
+    return make_float2(scalar * a.x, scalar * a.y);
+}
+inline __host__ __device__
+float2 operator+(const float2& a, const float2& b) {
+    return make_float2(a.x + b.x, a.y + b.y);
+}
 inline __host__ __device__
 float3 operator+(const float3& a, const float3& b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);

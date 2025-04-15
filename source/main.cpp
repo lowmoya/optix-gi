@@ -219,7 +219,7 @@ int main()
 		{"resources/room.obj",
 			{1, 0, 0, 0,	0, 1, 0, 0, 	0, 0, 1, 0}},
 		{"resources/simple_dining_table.glb",
-			{5, 0, 0, 0,	0, 5, 0, .7, 	0, 0, 5, 0}},
+			{.004, 0, 0, 0,	0, .004, 0, .7, 	0, 0, .004, 0}},
 		{"resources/retro_light.glb",
 			{.01, 0, 0, 0,	0, .01, 0, 6.7, 	0, 0, .01, 0}},
 		// {"resources/test.glb", make_float3(.6,.6,.6), .9, .1,
@@ -231,6 +231,7 @@ int main()
 		CUdeviceptr d_index;
 		CUdeviceptr d_vertex;
 		CUdeviceptr d_normal;
+		CUdeviceptr d_uv;
 		CUdeviceptr d_gas_mem;
 		int material_id;
 	};
@@ -243,15 +244,20 @@ int main()
 		float roughness;
 		float metallic;
 		float3 color;
+		int texture_id;
 	};
 #define MAX_MATERIALS 60
 	Material materials[MAX_MATERIALS];
-	materials[0] = {
-		.roughness = 1,
-		.metallic = 0
-	};
-	int material_count = 1;
+	int material_count = 0;
 
+	struct Texture {
+		CUdeviceptr d_image;
+		int width;
+		int height;
+	};
+#define MAX_TEXTURES 60
+	Texture textures[MAX_TEXTURES];
+	int texture_count = 0;
 
 	CUdeviceptr d_tlas_mem;
 	OptixTraversableHandle tlas_handle;  {
@@ -267,14 +273,32 @@ int main()
 				descriptions[f].path,
 				aiProcess_Triangulate | aiProcess_JoinIdenticalVertices
 				| aiProcess_GenNormals | aiProcess_OptimizeMeshes
-				| aiProcess_PreTransformVertices
+				| aiProcess_PreTransformVertices | aiProcess_EmbedTextures
 			);
 			if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE)
 					|| !scene->mRootNode) {
 				fprintf(stderr, "[Error] Failed to load '%s'.\n", descriptions[f].path);
 				exit(1);
 			}
+			
+			// Load the textures
+			int other_scene_textures = texture_count;
+			for (int ti = 0; ti < scene->mNumTextures; ++ti) {
+				aiTexture * texture = scene->mTextures[ti];
+				
+				textures[texture_count].width = texture->mWidth;
+				textures[texture_count].height = texture->mHeight;
+				
+				CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&textures[texture_count].d_image),
+					texture->mWidth * texture->mHeight * sizeof(uchar4)));
+				CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(textures[texture_count].d_image),
+					texture->pcData, texture->mWidth * texture->mHeight * sizeof(uchar4), cudaMemcpyHostToDevice));
 
+				++texture_count;
+				assert(texture_count != MAX_TEXTURES);
+			}
+
+			int hits = 0;
 			// Load the materials
 			int other_scene_materials = material_count;
 			for (int mi = 0; mi < scene->mNumMaterials; ++mi) {
@@ -293,7 +317,20 @@ int main()
 				ref_material->Get("GLTF_PBRMETTALLICROUGHNESS_BASE_COLOR_FACTOR", 0, 0, color);
 				materials[material_count].color = make_float3(color.r, color.g, color.b);
 
-				
+				aiString material_name;
+				if (ref_material->GetTextureCount(aiTextureType_DIFFUSE)) {
+					materials[material_count].texture_id = ++hits + other_scene_textures;
+				} else {
+					materials[material_count].texture_id = -1;
+				}
+
+				// aiString path;
+				// if (ref_material->GetTexture(aiTextureType_ALBE, 0, &path)) {
+				// 	std::string conv_path = path.C_Str();
+				// 	printf("%s\n", conv_path.c_str());
+				// } else {
+				// 	materials[material_count].texture_id = -1;
+				// }
 				++material_count;
 				assert(material_count != MAX_MATERIALS);
 			}
@@ -309,6 +346,7 @@ int main()
 				uint3 * indices =   (uint3 *)malloc(face_count * sizeof(uint3));
 				float3 * vertices = (float3 *)malloc(vertex_count * sizeof(float3));
 				float3 * normals =  (float3 *)malloc(vertex_count * sizeof(float3));
+				float2 * uv =  (float2 *)malloc(vertex_count * sizeof(float2));
 
 				for (int f = 0; f < face_count; ++f) {
 					assert(mesh->mFaces[f].mNumIndices == 3);
@@ -330,6 +368,10 @@ int main()
 						mesh->mNormals[v].y,
 						mesh->mNormals[v].z
 					);
+					uv[v] = make_float2(
+						mesh->mTextureCoords[0][v].x,
+						mesh->mTextureCoords[0][v].y
+					);
 				}
 
 				// Fill out build info
@@ -339,6 +381,8 @@ int main()
 					vertex_count * sizeof(float3)));
 				CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[model_count].d_normal),
 					vertex_count * sizeof(float3)));
+				CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&models[model_count].d_uv),
+					vertex_count * sizeof(float2)));
 
 				CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[model_count].d_index),
 					indices, face_count * sizeof(uint3), cudaMemcpyHostToDevice));
@@ -346,10 +390,13 @@ int main()
 					vertices, vertex_count * sizeof(float3), cudaMemcpyHostToDevice));
 				CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[model_count].d_normal),
 					normals, vertex_count * sizeof(float3), cudaMemcpyHostToDevice));
+				CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(models[model_count].d_uv),
+					uv, vertex_count * sizeof(float2), cudaMemcpyHostToDevice));
 				
 				free(indices);
 				free(vertices);
 				free(normals);
+				free(uv);
 				
 				OptixBuildInput input = {
 					.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES,
@@ -453,6 +500,7 @@ int main()
 		for (int r = 0; r < RT_COUNT; ++r) {
 			for (int m = 0; m < model_count; ++m) {
 				const int index = m + r * model_count;
+				int tid = materials[models[m].material_id].texture_id;
 				switch(r) {
 				case RT_RADIANCE:
 					OPTIX_CALL(optixSbtRecordPackHeader(radiance_hit_program, hit_records + index));
@@ -460,10 +508,19 @@ int main()
 						.indices = reinterpret_cast<uint3*>(models[m].d_index),
 						.vertices = reinterpret_cast<float3*>(models[m].d_vertex),
 						.normals = reinterpret_cast<float3*>(models[m].d_normal),
+						.uv = reinterpret_cast<float2*>(models[m].d_uv),
 						.color = make_float3(1, 1, 1),
 						.metallic = materials[models[m].material_id].metallic,
 						.roughness = materials[models[m].material_id].roughness
 					};
+					if (tid != -1) {
+						hit_records[index].data.width = textures[tid].width;
+						hit_records[index].data.height = textures[tid].height;
+						hit_records[index].data.image = reinterpret_cast<uchar4*>(textures[tid].d_image);
+					} else {
+						hit_records[index].data.width = 0;
+					}
+
 					break;
 				case RT_SHADOW:
 					OPTIX_CALL(optixSbtRecordPackHeader(shadow_hit_program, hit_records + index));
@@ -559,7 +616,11 @@ int main()
 			CUDA_CALL(cudaFree(reinterpret_cast<void *>(models[i].d_index)));
 			CUDA_CALL(cudaFree(reinterpret_cast<void *>(models[i].d_vertex)));
 			CUDA_CALL(cudaFree(reinterpret_cast<void *>(models[i].d_normal)));
+			CUDA_CALL(cudaFree(reinterpret_cast<void *>(models[i].d_uv)));
 			CUDA_CALL(cudaFree(reinterpret_cast<void *>(models[i].d_gas_mem)));
+		}
+		for (int i = 0; i < texture_count; ++i) {
+			CUDA_CALL(cudaFree(reinterpret_cast<void *>(textures[i].d_image)));
 		}
 
 		OPTIX_CALL(optixPipelineDestroy(pipeline));
