@@ -169,7 +169,7 @@ __global__ void __closesthit__radiance()
         int sun;
     } lights[] = {
         {
-            normalized(make_float3(-1, 1, 0)),
+            normalized(make_float3(-1, 2, 0)),
             make_float3(0, 0, 0), make_float3(0, 0, 0),
             10, 10,
             make_float3(1.0, .64, .4),
@@ -183,12 +183,14 @@ __global__ void __closesthit__radiance()
             .3, .3,
             make_float3(1.0, 1.0, 1.0),
             60,
-            // 10
-            1,
+            1 * LIGHT_SAMPLES,
             0
         }
     };
     const int light_count = sizeof(lights)/sizeof(*lights);
+
+    const float4 texture = tex2D<float4>(group_data.texture, uv.x, uv.y);
+    const float3 albedo = make_float3(texture.x, texture.y, texture.z);
 
     float3 direct_color = make_float3(0, 0, 0);
     const float3 outgoing = -1 * optixGetWorldRayDirection();
@@ -216,13 +218,12 @@ __global__ void __closesthit__radiance()
 
             if (!unobstructed)
                 continue;
-            float3 albedo;
-            if (group_data.width) {
-                uchar4 read = group_data.image[(int)(uv.y * group_data.height) * group_data.width + (int)(uv.x * group_data.width)];
-                albedo = make_float3((float)read.x / 255.0, (float)read.y / 255.0, (float)read.z / 255.0);
-            }
+            // if (group_data.width) {
+            //     uchar4 read = group_data.image[(int)(uv.y * group_data.height) * group_data.width + (int)(uv.x * group_data.width)];
+            //     albedo = make_float3((float)read.x / 255.0, (float)read.y / 255.0, (float)read.z / 255.0);
+            // }
             float3 brdf_val = brdf(incoming_dir, outgoing, normal, group_data.roughness, group_data.metallic,
-                group_data.color);
+                albedo);
             direct_color += lights[i].intensity * lights[i].color * brdf_val * dot(normal, incoming_dir)
                 / (incoming_mag * incoming_mag) / (float)lights[i].samples;
         }
@@ -234,8 +235,7 @@ __global__ void __closesthit__radiance()
     float3 indirect_color = make_float3(0,0,0);
     if (depth < MAX_TRACING_DEPTH - 1) {
         // const int samples = 200;
-        const int samples = 1;
-        for (int s = 0; s < samples; ++s) { 
+        for (int s = 0; s < INDIRECT_SAMPLES; ++s) { 
             uint next_depth = depth + 1;
             uint3 sample_color;
             // float3 sample_direction = -1 * sampleHemisphereUniform(normal, curand_uniform(&rand_state),
@@ -247,12 +247,11 @@ __global__ void __closesthit__radiance()
                 OPTIX_RAY_FLAG_NONE, RT_RADIANCE, RT_COUNT, MT_RADIANCE, sample_color.x,
                 sample_color.y, sample_color.z, next_depth);
 
-            indirect_color = indirect_color + (1.0 / (float)samples)
+            indirect_color = indirect_color + (1.0 / (float)INDIRECT_SAMPLES)
                 * brdf(sample_direction, outgoing, normal, group_data.roughness,
-                    group_data.metallic, group_data.color)
+                    group_data.metallic, albedo)
                 * make_float3(__int_as_float(sample_color.x), __int_as_float(sample_color.y),
                     __int_as_float(sample_color.z))
-                * make_float3(1, 1, 1)
                 * dot(sample_direction,normal);
         }
     }
@@ -270,14 +269,17 @@ __global__ void __closesthit__radiance()
 extern "C"
 __global__ void __miss__radiance()
 {
-    float t = (optixGetWorldRayDirection().y + 1.0f) / 2.0;
+    const MissData * data = (MissData *)optixGetSbtDataPointer();
 
-    // Simple 2-color gradient: horizon to zenith
-    float3 zenith = make_float3(0.2f, 0.2f, 0.4f);
-    float3 horizon = make_float3(1.0f, 0.5f, 0.2f);
-    float3 sky_color = zenith + t * (horizon - zenith);
+    const float3 dir = normalized(optixGetWorldRayDirection());
 
-    optixSetPayload_0(__float_as_int(1.f));
-    optixSetPayload_1(__float_as_int(0.5f));
-    optixSetPayload_2(__float_as_int(.2f)); 
+    const float u = (atan2f(dir.x + 1.2 , dir.z) + M_PIf) * (0.5f * M_1_PIf);
+    const float v = 0.5f * (1.0f + sin(M_PIf * 0.5f - acosf(dir.y)));
+
+
+    float4 color = tex2D<float4>(data->environment, u, v);
+
+    optixSetPayload_0(__float_as_int(min(color.x / 5.0, 1.0)));
+    optixSetPayload_1(__float_as_int(min(color.y / 5.0, 1.0)));
+    optixSetPayload_2(__float_as_int(min(color.z / 5.0, 1.0))); 
 }

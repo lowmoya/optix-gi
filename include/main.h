@@ -15,12 +15,12 @@ struct HitGroupData {
     float3 * vertices;
     float3 * normals;
     float2 * uv;
-    float3 color;
     float metallic;
     float roughness;
-    int width;
-    int height;
-    uchar4 * image;
+    cudaTextureObject_t texture;
+};
+struct MissData {
+    cudaTextureObject_t environment;
 };
 
 enum RayType {
@@ -36,7 +36,9 @@ enum MissType {
 };
 
 
-#define MAX_TRACING_DEPTH 1
+#define MAX_TRACING_DEPTH 3
+#define INDIRECT_SAMPLES 30
+#define LIGHT_SAMPLES 3
 
 /* Math extensions */
 inline __host__ __device__

@@ -6,12 +6,18 @@
 #include <optix_function_table_definition.h>
 #include <optix_stack_size.h>
 #include <optix_stubs.h>
+#include <OpenEXR/ImfRgbaFile.h>
+#include <OpenEXR/ImfArray.h>
+#include <OpenEXR/ImfRgba.h>
+#include <Imath/ImathBox.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 #include "main.h"
 
@@ -214,9 +220,9 @@ int main()
 		const char * path;
 		float transform[12];
 	} descriptions[] = {
-		{"resources/floor.obj",
+		{"resources/floor.glb",
 			{1, 0, 0, 0,	0, 1, 0, 0, 	0, 0, 1, 0}},
-		{"resources/room.obj",
+		{"resources/room.glb",
 			{1, 0, 0, 0,	0, 1, 0, 0, 	0, 0, 1, 0}},
 		{"resources/simple_dining_table.glb",
 			{.004, 0, 0, 0,	0, .004, 0, .7, 	0, 0, .004, 0}},
@@ -243,7 +249,6 @@ int main()
 	struct Material {
 		float roughness;
 		float metallic;
-		float3 color;
 		int texture_id;
 	};
 #define MAX_MATERIALS 60
@@ -251,19 +256,62 @@ int main()
 	int material_count = 0;
 
 	struct Texture {
-		CUdeviceptr d_image;
+		cudaArray_t d_array;
+		cudaTextureObject_t d_texture;
 		int width;
 		int height;
 	};
-#define MAX_TEXTURES 60
-	Texture textures[MAX_TEXTURES];
-	int texture_count = 0;
+	const char * texture_paths[] = {
+		"resources/sdt_fabric.png",
+		"resources/sdt_marble.png",
+		"resources/sdt_niunal.png",
+		"resources/sdt_plant_lvzhi.png",
+		"resources/sdt_qita.png",
+		"resources/sdt_white_boli.png",
+		"resources/grass.jpg",
+		"resources/curtains.png",
+		"resources/counter.jpg",
+		"resources/floor.jpg",
+		"resources/wall.jpg",
+	};
+	const int texture_count = sizeof(texture_paths) / sizeof(*texture_paths);
+	Texture textures[texture_count];
+
+	for (int i = 0; i < texture_count; ++i) {
+		Texture & tex = textures[i];
+
+		int channels;
+		unsigned char * data = stbi_load(texture_paths[i], &tex.width, &tex.height, &channels, 4);
+		if (!data) {
+			fprintf(stderr, "Failed to load '%s',\n", texture_paths[i]);
+			exit(1);
+		}
+
+		auto chan_desc = cudaCreateChannelDesc<uchar4>();
+		cudaMallocArray(&tex.d_array, &chan_desc, tex.width, tex.height);
+		cudaMemcpy2DToArray(tex.d_array, 0, 0, data, tex.width
+			* sizeof(uchar4), tex.width * sizeof(uchar4),
+			tex.height, cudaMemcpyHostToDevice);
+		stbi_image_free(data);
+
+		
+		cudaResourceDesc resource_desc = {};
+		resource_desc.resType = cudaResourceTypeArray;
+		resource_desc.res.array.array = tex.d_array;
+
+		cudaTextureDesc texture_desc = {};
+		texture_desc.addressMode[0] = cudaAddressModeWrap;
+		texture_desc.addressMode[1] = cudaAddressModeWrap;
+		texture_desc.filterMode = cudaFilterModeLinear;
+		texture_desc.readMode = cudaReadModeNormalizedFloat;
+		texture_desc.normalizedCoords = 1;
+
+		cudaCreateTextureObject(&tex.d_texture, &resource_desc, &texture_desc, 0);
+	}
 
 	CUdeviceptr d_tlas_mem;
 	OptixTraversableHandle tlas_handle;  {
 		const uint32_t input_flags[] = { OPTIX_GEOMETRY_FLAG_NONE };
-
-			
 
 		OptixInstance instances[MAX_MODELS];
 		for (uint f = 0; f < file_count; ++f) {
@@ -280,25 +328,7 @@ int main()
 				fprintf(stderr, "[Error] Failed to load '%s'.\n", descriptions[f].path);
 				exit(1);
 			}
-			
-			// Load the textures
-			int other_scene_textures = texture_count;
-			for (int ti = 0; ti < scene->mNumTextures; ++ti) {
-				aiTexture * texture = scene->mTextures[ti];
-				
-				textures[texture_count].width = texture->mWidth;
-				textures[texture_count].height = texture->mHeight;
-				
-				CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&textures[texture_count].d_image),
-					texture->mWidth * texture->mHeight * sizeof(uchar4)));
-				CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(textures[texture_count].d_image),
-					texture->pcData, texture->mWidth * texture->mHeight * sizeof(uchar4), cudaMemcpyHostToDevice));
 
-				++texture_count;
-				assert(texture_count != MAX_TEXTURES);
-			}
-
-			int hits = 0;
 			// Load the materials
 			int other_scene_materials = material_count;
 			for (int mi = 0; mi < scene->mNumMaterials; ++mi) {
@@ -313,24 +343,8 @@ int main()
 				ref_material->Get("GLTF_PBRMETALLICROUGHNESS_METALLIC_FACTOR", 0, 0,
 					materials[material_count].metallic);
 
-				aiColor3D color(1.0, 1.0, 1.0);
-				ref_material->Get("GLTF_PBRMETTALLICROUGHNESS_BASE_COLOR_FACTOR", 0, 0, color);
-				materials[material_count].color = make_float3(color.r, color.g, color.b);
-
-				aiString material_name;
-				if (ref_material->GetTextureCount(aiTextureType_DIFFUSE)) {
-					materials[material_count].texture_id = ++hits + other_scene_textures;
-				} else {
-					materials[material_count].texture_id = -1;
-				}
-
-				// aiString path;
-				// if (ref_material->GetTexture(aiTextureType_ALBE, 0, &path)) {
-				// 	std::string conv_path = path.C_Str();
-				// 	printf("%s\n", conv_path.c_str());
-				// } else {
-				// 	materials[material_count].texture_id = -1;
-				// }
+				materials[material_count].texture_id = 7;
+				
 				++material_count;
 				assert(material_count != MAX_MATERIALS);
 			}
@@ -370,7 +384,7 @@ int main()
 					);
 					uv[v] = make_float2(
 						mesh->mTextureCoords[0][v].x,
-						mesh->mTextureCoords[0][v].y
+						1.0 - mesh->mTextureCoords[0][v].y
 					);
 				}
 
@@ -446,6 +460,30 @@ int main()
 			}
 		}
 
+		// 1 mat is floor
+		// 2 room
+		// materials[0].texture_id = 6;
+		// materials[1].texture_id = 7;
+		// materials[5].texture_id = 4; // plates / bowls
+		// materials[6].texture_id = 3; // plants
+		// materials[7].texture_id = 1; // table / chairs
+		// materials[8].texture_id = 0; // tablemat
+		// materials[9].texture_id = 4;
+		// materials[0].texture_id = 6;
+		// materials[1].texture_id = 7;
+
+		materials[0].texture_id = 6; // grass
+		materials[1].texture_id = 10; // wall
+		materials[2].texture_id = 8; // floor
+		materials[3].texture_id = 9; // counter
+		materials[4].texture_id = 1; // curtain rod
+		materials[5].texture_id = 7; // curtain
+		materials[7].texture_id = 4; // plates / bowls
+		materials[8].texture_id = 3; // plants
+		materials[9].texture_id = 1; // table / chairs
+		materials[10].texture_id = 0; // tablemat
+		materials[11].texture_id = 4; // plates / bowls
+
 		// Allocate memory for the build
 		CUdeviceptr d_instances;
 		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_instances), sizeof(instances)));
@@ -478,6 +516,38 @@ int main()
 		CUDA_CALL(cudaFree(reinterpret_cast<void*>(d_tmp_mem)));
 	}
 
+
+	/* Prepare environment map. */
+	cudaArray_t d_sunset_array;
+	cudaTextureObject_t d_sunset_texture;
+	{
+		int width, height, channels;
+		float * data = stbi_loadf("resources/sunset.hdr", &width, &height, &channels, 4);
+		if (!data) {
+			fputs("Failed to load 'resources/sunset.hdr'.\n", stderr);
+			exit(1);
+		}
+		auto chan_desc = cudaCreateChannelDesc<float4>();
+		cudaMallocArray(&d_sunset_array, &chan_desc, width, height, 0);
+		cudaMemcpy2DToArray(d_sunset_array, 0, 0, data, width * sizeof(float4), width * sizeof(float4),
+			height, cudaMemcpyHostToDevice);
+		stbi_image_free(data);
+
+
+		cudaResourceDesc resource_desc = {};
+		resource_desc.resType = cudaResourceTypeArray;
+		resource_desc.res.array.array = d_sunset_array;
+
+		cudaTextureDesc texture_desc = {};
+		texture_desc.addressMode[0] = cudaAddressModeWrap;
+		texture_desc.addressMode[1] = cudaAddressModeWrap;
+		texture_desc.filterMode = cudaFilterModeLinear;
+		texture_desc.readMode = cudaReadModeElementType;
+		texture_desc.normalizedCoords = 1;
+
+		cudaCreateTextureObject(&d_sunset_texture, &resource_desc, &texture_desc, 0);
+	}
+
 	/* Set up shader binding table. */
 	// Have closest hit include the geometries index, vertex, normal info
 	// they should all share a pointer to a list of area lights.
@@ -500,7 +570,8 @@ int main()
 		for (int r = 0; r < RT_COUNT; ++r) {
 			for (int m = 0; m < model_count; ++m) {
 				const int index = m + r * model_count;
-				int tid = materials[models[m].material_id].texture_id;
+				Material & material = materials[models[m].material_id];
+
 				switch(r) {
 				case RT_RADIANCE:
 					OPTIX_CALL(optixSbtRecordPackHeader(radiance_hit_program, hit_records + index));
@@ -509,17 +580,10 @@ int main()
 						.vertices = reinterpret_cast<float3*>(models[m].d_vertex),
 						.normals = reinterpret_cast<float3*>(models[m].d_normal),
 						.uv = reinterpret_cast<float2*>(models[m].d_uv),
-						.color = make_float3(1, 1, 1),
-						.metallic = materials[models[m].material_id].metallic,
-						.roughness = materials[models[m].material_id].roughness
+						.metallic = material.metallic,
+						.roughness = material.roughness,
+						.texture = textures[material.texture_id].d_texture
 					};
-					if (tid != -1) {
-						hit_records[index].data.width = textures[tid].width;
-						hit_records[index].data.height = textures[tid].height;
-						hit_records[index].data.image = reinterpret_cast<uchar4*>(textures[tid].d_image);
-					} else {
-						hit_records[index].data.width = 0;
-					}
 
 					break;
 				case RT_SHADOW:
@@ -539,8 +603,9 @@ int main()
 
 		/* Miss record. */
 		// Create record on GPU.
-		SbtRecord<void> miss_records[MT_COUNT] = {};
+		SbtRecord<MissData> miss_records[MT_COUNT] = {};
 		OPTIX_CALL(optixSbtRecordPackHeader(radiance_miss_program, miss_records + MT_RADIANCE));
+		miss_records[0].data.environment = d_sunset_texture;
 		OPTIX_CALL(optixSbtRecordPackHeader(shadow_miss_program, miss_records + MT_SHADOW));
 
 		// Create record on Host and copy to GPU.
@@ -620,8 +685,11 @@ int main()
 			CUDA_CALL(cudaFree(reinterpret_cast<void *>(models[i].d_gas_mem)));
 		}
 		for (int i = 0; i < texture_count; ++i) {
-			CUDA_CALL(cudaFree(reinterpret_cast<void *>(textures[i].d_image)));
+			CUDA_CALL(cudaDestroyTextureObject(textures[i].d_texture));
+			CUDA_CALL(cudaFreeArray(textures[i].d_array));
 		}
+		CUDA_CALL(cudaDestroyTextureObject(d_sunset_texture));
+		CUDA_CALL(cudaFreeArray(d_sunset_array));
 
 		OPTIX_CALL(optixPipelineDestroy(pipeline));
 		OPTIX_CALL(optixProgramGroupDestroy(radiance_raygen_program));
