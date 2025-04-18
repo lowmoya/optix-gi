@@ -11,7 +11,7 @@ __constant__ Params params;
 }
 
 /*
- * RAY GEN
+ * Utility functinos
  */
 __device__ void storePointer(void * ptr, uint32_t & lh, uint32_t & rh) {
     uint64_t uptr = reinterpret_cast<uint64_t>(ptr);
@@ -23,7 +23,121 @@ __device__ void * loadPointer(uint32_t lh, uint32_t rh) {
         | (static_cast<uint64_t>(rh));
     return reinterpret_cast<void *>(uptr);
 }
+__device__
+float minf(float a, float b) {
+    return a > b ? b : a;
+}
+__device__
+float maxf(float a, float b) {
+    return a > b ? a : b;
+}
+// Based on distributions from
+// https://en.wikipedia.org/wiki/Specular_highlight
+// https://en.wikipedia.org/wiki/Lambertian_reflectance
+__device__
+float spectrumBRDF(float3 incoming, float3 outgoing, float3 normal, float albedo, float roughness, float metallic)
+{
+    // Calculate common variables
+    float3 h = normalized(incoming + outgoing);
+    float dLN = max(dot(normal, outgoing), 0.0001);
+    float dVN = max(dot(normal, incoming), 0.0001);
+    float dHN = min(max(dot(normal, h), 0.0001), 1.0);
+    float dVH = max(dot(incoming, h), 0.0001);
+    roughness = max(roughness, 0.0001);
 
+    // Calculate fresnel reflectance
+    float F0 = .04 + metallic * (albedo - .04);
+    float F = F0 + (1 - F0) * powf(1.0 - dVH, 5.0);
+
+
+    // Beckmann distribution
+    float alpha = acosf(dHN);
+    float cos2a = powf(cosf(alpha), 2);
+    float tan2a = (1.0 - cos2a) / cos2a;
+    float beckmann = expf(-tan2a / (roughness * roughness)) / (M_PIf * roughness * roughness * cos2a * cos2a);
+
+
+    // Cook-Torrance model
+    float G = minf(minf(
+        (2.0 * dHN * dVN) / dVH,
+        (2.0 * dHN * dLN) / dVH
+    ), 1);
+    float kspec = (beckmann * G * F) / (M_PIf * dVN * dLN); 
+
+    // Diffuse model
+    float kd = (1 - F) * (1 - metallic) * (float)albedo / M_PIf;
+
+    return kspec + kd;
+}
+
+__device__ float3 sampleHemisphereUniform(float3 normal, float u1, float u2) {
+    float r = sqrtf(u1);
+    float theta = 2 * M_PIf * u2;
+
+    float x = r * cosf(theta);
+    float y = r * sinf(theta);
+    float z = sqrtf(fmaxf(0, 1 - u1));
+
+    float3 normal_u, normal_v;
+    if (fabs(normal.z) > 0.999f) {
+        normal_u = make_float3(1, 0, 0);
+        normal_v = make_float3(0, 1, 0);
+    } else {
+        normal_u = normalized(cross(make_float3(0, 0, 1), normal));
+        normal_v = cross(normal, normal_u);
+    }
+
+    return normalized(normal_u * x + normal_v * y + normal * z);
+}
+
+__constant__ __uint32_t sobol_matrix[4][32] = {
+    {
+        0x80000000, 0x40000000, 0x20000000, 0x10000000,
+        0x08000000, 0x04000000, 0x02000000, 0x01000000,
+        0x00800000, 0x00400000, 0x00200000, 0x00100000,
+        0x00080000, 0x00040000, 0x00020000, 0x00010000,
+        0x00008000, 0x00004000, 0x00002000, 0x00001000,
+        0x00000800, 0x00000400, 0x00000200, 0x00000100,
+        0x00000080, 0x00000040, 0x00000020, 0x00000010,
+        0x00000008, 0x00000004, 0x00000002, 0x00000001
+    },
+    {
+        0x80000000, 0xC0000000, 0x60000000, 0x30000000,
+        0x18000000, 0x0C000000, 0x06000000, 0x03000000,
+        0x01800000, 0x00C00000, 0x00600000, 0x00300000,
+        0x00180000, 0x000C0000, 0x00060000, 0x00030000,
+        0x00018000, 0x0000C000, 0x00006000, 0x00003000,
+        0x00001800, 0x00000C00, 0x00000600, 0x00000300,
+        0x00000180, 0x000000C0, 0x00000060, 0x00000030,
+        0x00000018, 0x0000000C, 0x00000006, 0x00000003
+    },
+};
+__device__ __uint32_t sobol(__uint32_t index, int dim) {
+    __uint32_t result = 0;
+    for (int i = 0; i < 32; ++i) {
+        if (index & (1u << i))
+            result ^= sobol_matrix[dim][i];
+    }
+    return result;
+}
+/* Estimate a spectrum from some RGB*/
+__device__ float guassian(float wavelength, float center, float distribution) {
+    float difference = (wavelength - center) / distribution;
+    return expf(-0.5 * difference * difference);
+}
+__device__ void makeSpectrum(float3 color, float * samples) {
+    for (int i = 0; i < SPECTRAL_SAMPLES; ++i) {
+        const int wavelength = SPECTRAL_START + i * SPECTRAL_STEP;
+        samples[i] += (color.z * guassian(wavelength, 450, 30)
+            + color.y * guassian(wavelength, 530, 30)
+            + color.x * guassian(wavelength, 620, 30));
+    }
+}
+
+
+/*
+ * RAY GEN
+ */
 extern "C"
 __global__ void __raygen__radiance()
 {
@@ -64,111 +178,6 @@ __global__ void __raygen__radiance()
 /*
  * CLOSEST HIT
  */
-
-__device__
-float minf(float a, float b) {
-    return a > b ? b : a;
-}
-__device__
-float maxf(float a, float b) {
-    return a > b ? a : b;
-}
-
-// Based on distributions from
-// https://en.wikipedia.org/wiki/Specular_highlight
-// https://en.wikipedia.org/wiki/Lambertian_reflectance
-__device__
-float spectrumBRDF(float3 incoming, float3 outgoing, float3 normal, float albedo, float roughness, float metallic)
-{
-    // Calculate common variables
-    float3 h = normalized(incoming + outgoing);
-    float dLN = max(dot(normal, outgoing), 0.0001);
-    float dVN = max(dot(normal, incoming), 0.0001);
-    float dHN = min(max(dot(normal, h), 0.0001), 1.0);
-    float dVH = max(dot(incoming, h), 0.0001);
-    roughness = max(roughness, 0.0001);
-
-    // Calculate fresnel reflectance
-    float F0 = .04 + metallic * (albedo - .04);
-    float F = F0 + (1 - F0) * powf(1.0 - dVH, 5.0);
-
-
-    // Beckmann distribution
-    float alpha = acosf(dHN);
-    float cos2a = powf(cosf(alpha), 2);
-    float tan2a = (1.0 - cos2a) / cos2a;
-    float beckmann = expf(-tan2a / (roughness * roughness)) / (M_PIf * roughness * roughness * cos2a * cos2a);
-
-
-    // Cook-Torrance model
-    float G = minf(minf(
-        (2.0 * dHN * dVN) / dVH,
-        (2.0 * dHN * dLN) / dVH
-    ), 1);
-    float kspec = (beckmann * G * F) / (M_PIf * dVN * dLN); 
-
-    // Diffuse model
-    float kd = (1 - F) * (1 - metallic) * (float)albedo / M_PIf;
-
-    return kspec + kd;
-}
-
-// Rewrite
-// change sampling method to require less samples
-__device__ float3 sampleHemisphereUniform(float3 normal, float u1, float u2) {
-    float r = sqrtf(u1);
-    float theta = 2 * M_PIf * u2;
-
-    float x = r * cosf(theta);
-    float y = r * sinf(theta);
-    float z = sqrtf(fmaxf(0, 1 - u1));
-
-    float3 normal_u, normal_v;
-    if (fabs(normal.z) > 0.999f) {
-        normal_u = make_float3(1, 0, 0);
-        normal_v = make_float3(0, 1, 0);
-    } else {
-        normal_u = normalized(cross(make_float3(0, 0, 1), normal));
-        normal_v = cross(normal, normal_u);
-    }
-
-    return normalized(normal_u * x + normal_v * y + normal * z);
-}
-
-__constant__ __uint32_t sobol_matrix[4][32] = {
-    // Dimension 0
-    {
-        0x80000000, 0x40000000, 0x20000000, 0x10000000,
-        0x08000000, 0x04000000, 0x02000000, 0x01000000,
-        0x00800000, 0x00400000, 0x00200000, 0x00100000,
-        0x00080000, 0x00040000, 0x00020000, 0x00010000,
-        0x00008000, 0x00004000, 0x00002000, 0x00001000,
-        0x00000800, 0x00000400, 0x00000200, 0x00000100,
-        0x00000080, 0x00000040, 0x00000020, 0x00000010,
-        0x00000008, 0x00000004, 0x00000002, 0x00000001
-    },
-    // Dimension 1
-    {
-        0x80000000, 0xC0000000, 0x60000000, 0x30000000,
-        0x18000000, 0x0C000000, 0x06000000, 0x03000000,
-        0x01800000, 0x00C00000, 0x00600000, 0x00300000,
-        0x00180000, 0x000C0000, 0x00060000, 0x00030000,
-        0x00018000, 0x0000C000, 0x00006000, 0x00003000,
-        0x00001800, 0x00000C00, 0x00000600, 0x00000300,
-        0x00000180, 0x000000C0, 0x00000060, 0x00000030,
-        0x00000018, 0x0000000C, 0x00000006, 0x00000003
-    },
-};
-__device__ __uint32_t sobol(__uint32_t index, int dim) {
-    __uint32_t result = 0;
-    for (int i = 0; i < 32; ++i) {
-        if (index & (1u << i))
-            result ^= sobol_matrix[dim][i];
-    }
-    return result;
-}
-
-
 struct Light {
     float3 position;
     float3 width_dir;
@@ -180,22 +189,6 @@ struct Light {
     int sun;
     float spectrum[SPECTRAL_SAMPLES];
 };
-
-/* Estimate a spectrum from some RGB*/
-__device__ float guassian(float wavelength, float center, float distribution) {
-    float difference = (wavelength - center) / distribution;
-    return expf(-0.5 * difference * difference);
-}
-__device__ void makeSpectrum(float3 color, float * samples) {
-    for (int i = 0; i < SPECTRAL_SAMPLES; ++i) {
-        const int wavelength = SPECTRAL_START + i * SPECTRAL_STEP;
-        samples[i] += (color.z * guassian(wavelength, 450, 30)
-            + color.y * guassian(wavelength, 530, 30)
-            + color.x * guassian(wavelength, 620, 30));
-    }
-}
-
-
 extern "C"
 __global__ void __closesthit__radiance()
 {
@@ -208,7 +201,7 @@ __global__ void __closesthit__radiance()
     float * spectrum = reinterpret_cast<float *>(loadPointer(optixGetPayload_1(), optixGetPayload_2()));
 
 
-    // // Extract geometry data
+    // Extract geometry data
     const uint3 indices = group_data.indices[optixGetPrimitiveIndex()];
     const float3 position = optixTransformPointFromObjectToWorldSpace((1 - bc.x - bc.y) * group_data.vertices[indices.x]
         + bc.x * group_data.vertices[indices.y]
@@ -277,7 +270,7 @@ __global__ void __closesthit__radiance()
             if (!unobstructed)
                 continue;
             
-            // Should use the brdf to apply to spectrum
+            // Apply contribution from lightsource hitting surface to total
             if (depth == 1) {
                 float light_scale = lights[li].intensity * dot(normal, incoming_dir)
                     / (incoming_mag * incoming_mag * (float)lights[li].samples);
@@ -305,16 +298,15 @@ __global__ void __closesthit__radiance()
             float3 sample_direction = sampleHemisphereUniform(normal,
                 (double)sobol(s, 0) / (double)__UINT32_MAX__, (double)sobol(s, 1) / (double)__UINT32_MAX__);
 
+            /* Sample a spectrum from a random direction*/
             float in_spectrum[SPECTRAL_SAMPLES] = {};
-
             uint next_depth = depth + 1;
             uint ptr_lh, ptr_rh;
             storePointer(in_spectrum, ptr_lh, ptr_rh);
-
             optixTrace(params.handle, position, sample_direction, 0.001, 1e16, 0, OptixVisibilityMask(255),
                 OPTIX_RAY_FLAG_NONE, RT_RADIANCE, RT_COUNT, MT_RADIANCE, next_depth, ptr_lh, ptr_rh);
 
-
+            /* Apply contribution from spectrum to total */
             for (int si = 0; si < SPECTRAL_SAMPLES; ++si) {
                 spectrum[si] +=
                     in_spectrum[si] * dot(normal, sample_direction)
@@ -323,11 +315,6 @@ __global__ void __closesthit__radiance()
             }
         }
     }
-
-    // if (depth != 0) {
-    //     for (int i = 0; i < SPECTRAL_SAMPLES; ++i)
-    //         spectrum[i] = 0;
-    // }
 }
 
 
