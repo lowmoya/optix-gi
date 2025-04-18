@@ -2,7 +2,8 @@
 #include <curand_kernel.h>
 #include <optix.h>
 
-#include "main.h"
+#include "common.h"
+#include "extmath.h"
 
 extern "C"
 {

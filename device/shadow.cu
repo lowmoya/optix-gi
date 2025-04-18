@@ -1,7 +1,7 @@
 #include <cuda_runtime.h>
 #include <optix.h>
 
-#include "main.h"
+#include "common.h"
 
 // Simple obstruction module
 

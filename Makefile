@@ -49,7 +49,7 @@ clean:
 
 # File tasks
 $(EXE):  $(PTXFILES) $(OBJFILES)
-	@rm -f .compmark .depmark
+	@rm -f .compmark .depmark .ptxmark
 	@echo -e '\n=> Linking Executable'
 	$(CC) $(OBJFILES) -o $@ $(LDF) $(LF)
 

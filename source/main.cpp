@@ -1,22 +1,20 @@
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
-#include <cuda_runtime.h>
-#include <optix.h>
-#include <optix_function_table_definition.h>
-#include <optix_stack_size.h>
-#include <optix_stubs.h>
 #include <Imath/ImathBox.h>
+
+#include <optix_stack_size.h>
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#include "extmath.h"
+#include "common.h"
 #include "main.h"
 
 #define OPTIX_CALL(call) { if (call != OPTIX_SUCCESS) {\
@@ -235,42 +233,6 @@ const float CIE_Z[] = {
     0.000000000000, 0.000000000000, 0.000000000000, 0.000000000000, 0.000000000000,
     0.000000000000, 0.000000000000, 0.000000000000, 0.000000000000, 0.000000000000,
     0.000000000000};
-
-
-
-// Simple matrix helper functions
-void inverseMatrix(float * in, float * out)
-{
-	float determinant = in[0] * (in[4] * in[8] - in[5] * in[7])
-		- in[1] * (in[3] * in[8] - in[5] * in[6])
-		+ in[2] * (in[3] * in[7] - in[4] * in[6]);
-	if (!determinant) {
-		fputs("Err: Calling inverse matrix with a zero-determinant input.\n",
-		stderr);
-		return;
-	}
-	out[0] = (in[4] * in[8] - in[5] * in[7]) / determinant;
-	out[1] = -(in[1] * in[8] - in[2] * in[7]) / determinant;
-	out[2] = (in[1] * in[5] - in[2] * in[4]) / determinant;
-	out[3] = -(in[3] * in[8] - in[5] * in[6]) / determinant;
-	out[4] = (in[0] * in[8] - in[2] * in[6]) / determinant;
-	out[5] = -(in[0] * in[5] - in[2] * in[3]) / determinant;
-	out[6] = (in[3] * in[7] - in[4] * in[6]) / determinant;
-	out[7] = -(in[0] * in[7] - in[1] * in[6]) / determinant;
-	out[8] = (in[0] * in[4] - in[1] * in[3]) / determinant;
-}
-void multMatrix(float * mat, float * v_in, float * v_out)
-{
-	v_out[0] = mat[0] * v_in[0] + mat[1] * v_in[1] + mat[2] * v_in[2];
-	v_out[1] = mat[3] * v_in[0] + mat[4] * v_in[1] + mat[5] * v_in[2];
-	v_out[2] = mat[6] * v_in[0] + mat[7] * v_in[1] + mat[8] * v_in[2];
-}
-int min(int a, int b) {
-	return a < b ? a : b;
-}
-float maxf(float a, float b) {
-	return a < b ? b : a;
-}
 
 char * readFile(char const * path, int & length)
 {
@@ -907,19 +869,11 @@ int main()
 		CUDA_CALL(cudaMemcpy(spectral_buffer, reinterpret_cast<void*>(d_spectral_buffer), output_size, cudaMemcpyDeviceToHost));
 		float average = 0.0;
 		for (int i = 0; i < output_count * SPECTRAL_SAMPLES; ++i) {
-			average += log(maxf(spectral_buffer[i], 0.00001)) / (float)(output_count * SPECTRAL_SAMPLES);
+			average += log(fmax(spectral_buffer[i], 0.00001)) / (float)(output_count * SPECTRAL_SAMPLES);
 		}
 		float factor = 0.00001 / exp(average);
 		for (int i = 0; i < output_count * SPECTRAL_SAMPLES; ++i)
 			spectral_buffer[i] *= factor;
-		// float max = 0.0;
-		// for (int i = 0; i < output_count * SPECTRAL_SAMPLES; ++i) {
-		// 	if (spectral_buffer[i] > max)
-		// 		max = spectral_buffer[i];
-		// }
-		// float factor = max > 0.18 ? 1.0 / max : 1.0;
-		// for (int i = 0; i < output_count * SPECTRAL_SAMPLES; ++i)
-		// 	spectral_buffer[i] *= factor;
 
 		uchar4 * output_buffer = (uchar4 *)malloc(output_count * sizeof(uchar4));
 
