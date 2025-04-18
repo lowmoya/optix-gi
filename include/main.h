@@ -4,7 +4,7 @@
 #define SPECTRAL_SAMPLES 16
 #define SPECTRAL_START 400
 #define SPECTRAL_END 700
-#define SPECTRAL_STEP ((SPECTRAL_END - SPECTRAL_END) / (SPECTRAL_SAMPLES - 1))
+#define SPECTRAL_STEP ((SPECTRAL_END - SPECTRAL_START) / (SPECTRAL_SAMPLES - 1))
 
 #define MAX_TRACING_DEPTH 2
 #define INDIRECT_SAMPLES 1
@@ -20,7 +20,6 @@ struct Params {
 };
 
 struct HitGroupData {
-    float * spectra;
     uint3 * indices;
     float3 * vertices;
     float3 * normals;

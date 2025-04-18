@@ -6,9 +6,6 @@
 #include <optix_function_table_definition.h>
 #include <optix_stack_size.h>
 #include <optix_stubs.h>
-#include <OpenEXR/ImfRgbaFile.h>
-#include <OpenEXR/ImfArray.h>
-#include <OpenEXR/ImfRgba.h>
 #include <Imath/ImathBox.h>
 
 #include <stdio.h>
@@ -102,6 +99,12 @@ char * readFile(char const * path, int & length)
 
 	fclose(file);
 	return buffer;
+}
+
+
+
+float gamma(float color) {
+	return color <= 0.0031308 ? 12.92 * color : 1.055 * pow(color, 1.0/2.4) - 0.055;
 }
 
 int main()
@@ -308,6 +311,7 @@ int main()
 		"resources/counter.jpg",
 		"resources/floor.jpg",
 		"resources/wall.jpg",
+		"resources/lamp.png",
 	};
 	const int texture_count = sizeof(texture_paths) / sizeof(*texture_paths);
 	Texture textures[texture_count];
@@ -495,18 +499,6 @@ int main()
 			}
 		}
 
-		// 1 mat is floor
-		// 2 room
-		// materials[0].texture_id = 6;
-		// materials[1].texture_id = 7;
-		// materials[5].texture_id = 4; // plates / bowls
-		// materials[6].texture_id = 3; // plants
-		// materials[7].texture_id = 1; // table / chairs
-		// materials[8].texture_id = 0; // tablemat
-		// materials[9].texture_id = 4;
-		// materials[0].texture_id = 6;
-		// materials[1].texture_id = 7;
-
 		materials[0].texture_id = 6; // grass
 		materials[1].texture_id = 10; // wall
 		materials[2].texture_id = 8; // floor
@@ -517,7 +509,8 @@ int main()
 		materials[8].texture_id = 3; // plants
 		materials[9].texture_id = 1; // table / chairs
 		materials[10].texture_id = 0; // tablemat
-		materials[11].texture_id = 4; // plates / bowls
+		materials[11].texture_id = 1; // plates / bowls
+		materials[14].texture_id = 11; // lamp
 
 		// Allocate memory for the build
 		CUdeviceptr d_instances;
@@ -585,7 +578,7 @@ int main()
 
 
 	CUdeviceptr d_spectral_buffer;
-	const size_t output_width = 800, output_height = 800;
+	const size_t output_width = 800, output_height = 600;
 	const size_t output_count = output_width * output_height;
 	const size_t output_size = output_count * SPECTRAL_SAMPLES * sizeof(float);
 	CUDA_CALL(cudaMalloc(reinterpret_cast<void **>(&d_spectral_buffer), output_size));
@@ -618,7 +611,6 @@ int main()
 				case RT_RADIANCE:
 					OPTIX_CALL(optixSbtRecordPackHeader(radiance_hit_program, hit_records + index));
 					hit_records[index].data = {
-						.spectra = reinterpret_cast<float *>(d_spectral_buffer),
 						.indices = reinterpret_cast<uint3*>(models[m].d_index),
 						.vertices = reinterpret_cast<float3*>(models[m].d_vertex),
 						.normals = reinterpret_cast<float3*>(models[m].d_normal),
@@ -632,7 +624,6 @@ int main()
 				case RT_SHADOW:
 					OPTIX_CALL(optixSbtRecordPackHeader(shadow_hit_program, hit_records + index));
 					hit_records[index].data = {
-						.spectra = reinterpret_cast<float *>(d_spectral_buffer),
 					};
 					break;
 				}
@@ -704,11 +695,16 @@ int main()
 	{
 		float * spectral_buffer = (float *)malloc(output_count * SPECTRAL_SAMPLES * sizeof(float));
 		CUDA_CALL(cudaMemcpy(spectral_buffer, reinterpret_cast<void*>(d_spectral_buffer), output_size, cudaMemcpyDeviceToHost));
+		float max = 1.0;
+		for (int i = 0; i < output_count * SPECTRAL_SAMPLES; ++i)
+			if (spectral_buffer[i] > max)
+				max = spectral_buffer[i];
 		uchar4 * output_buffer = (uchar4 *)malloc(output_count * sizeof(uchar4));
 
 		static float xyz_transform[9];
+		// Adobe RGB values
 		const float xw = 0.3127, yw = 0.3290, Yw = 1.0;
-		const float xr = 0.640, yr = 0.330, xg = 0.3, yg = 0.6, xb = 0.150, yb = 0.060;
+		const float xr = 0.640, yr = 0.330, xg = 0.21, yg = 0.71, xb = 0.150, yb = 0.060;
 
 		// Calculate the whitepoint colorspace.
 		const float zr = 1 - xr - yr, zg = 1 - xg - yg, zb = 1 - xb - yb, zw = 1 - xw - yw;
@@ -736,21 +732,25 @@ int main()
 				X += spectrum[nm] * CIE_X[nm] * SPECTRAL_STEP;
 				Y += spectrum[nm] * CIE_Y[nm] * SPECTRAL_STEP;
 				Z += spectrum[nm] * CIE_Z[nm] * SPECTRAL_STEP;
-				printf("%d %d %f %f %f\n", i, nm, spectrum[nm]);
 			}
 
 			float XYZ_sum = X + Y + Z;
 			float x = 0, y = 0, z = 0;
 			if (XYZ_sum) {
-				x = X / XYZ_sum;
-				y = Y / XYZ_sum;
-				z = Z / XYZ_sum;
+				x = X / max;
+				y = Y / max;
+				z = Z / max;
 			}
+
 
 			// Calculate the final RGB values
 			float xyz[3] = { x, y, z };
 			float rgb[3];
 			multMatrix(xyz_transform, xyz, rgb);
+
+			rgb[0] = gamma(rgb[0]);
+			rgb[1] = gamma(rgb[1]);
+			rgb[2] = gamma(rgb[2]);
 
 			output_buffer[i] = make_uchar4(
 				min(rgb[0] * 255, 255), min(rgb[1] * 255, 255), min(rgb[2] * 255, 255), 255
