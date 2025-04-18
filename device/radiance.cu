@@ -146,15 +146,13 @@ __global__ void __raygen__radiance()
     const float3 ray_origin = params.cam_pos;
     const float3 ray_direction = normalized(
         params.cam_w
-        + (float)(2.0f * ((float)(launch_index.x + params.offset_x) + 0.5)
+        + (float)(2.0f * ((float)launch_index.x + 0.5)
             / (float)params.output_width - 1.0f) * params.cam_u
-        + (float)(2.0f * ((float)(launch_index.y + params.offset_y) + 0.5)
+        + (float)(2.0f * ((float)launch_index.y + 0.5)
             / (float)params.output_height - 1.0f) * params.cam_v
     );
-    unsigned int spectra_index =
-        ((launch_index.x + params.offset_x)
-        + params.output_width * (launch_index.y + params.offset_y))
-            * SPECTRAL_SAMPLES;
+    unsigned int spectra_index = (launch_index.x + params.output_width * launch_index.y)
+        * SPECTRAL_SAMPLES;
 
     /* Initialize spectra to 0. */
     for (int i = 0; i < SPECTRAL_SAMPLES; ++i)

@@ -22,8 +22,10 @@
 
 int main()
 {
+	/*
+	 * Cuda and Optix initialization.
+	 */
 	puts("Setting up application.");
-	/* Cuda and Optix initialization. */
 	CUDA_CALL(cudaFree(0));
 	OPTIX_CALL(optixInit());
 	CUcontext cu_context = 0;
@@ -33,11 +35,14 @@ int main()
 			printf("[(%d)%s]\t\t%s\n", level, tag, message);
 		};
 		options.logCallbackLevel = 3;
-		// options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
 		OPTIX_CALL(optixDeviceContextCreate(cu_context, &options, &context));
 	}
 
-	/* Create a Module from PTX file. */
+
+
+	/*
+	 * Create Modules
+	 */
 	OptixPipelineCompileOptions pipeline_comp_options = {
 		.usesMotionBlur = false,
 		.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING,
@@ -46,6 +51,7 @@ int main()
 		.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE,
 		.pipelineLaunchParamsVariableName = "params"
 	};
+	// Radiance
 	OptixModule radiance_module = nullptr; {
 		OptixModuleCompileOptions module_options = {
 			.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0,
@@ -60,6 +66,7 @@ int main()
 		));
 		free(ptx);
 	}
+	// Shadow
 	OptixModule shadow_module = nullptr; {
 		OptixModuleCompileOptions module_options = {
 			.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0,
@@ -76,8 +83,11 @@ int main()
 	}
 
 
-	/* Create program groups from the Module, which correspond to specific function calls from the
-	 * PTX file. */
+
+	/*
+	 * Create Program Groups
+	 */
+	// Radiance program groups
 	OptixProgramGroup radiance_raygen_program, radiance_hit_program, radiance_miss_program; {
 		OptixProgramGroupOptions options = {};
 
@@ -114,6 +124,7 @@ int main()
 			context, &hit_description, 1, &options, LOG, &LOG_SIZE, &radiance_hit_program
 		));
 	}
+	// Shadow program groups
 	OptixProgramGroup shadow_hit_program, shadow_miss_program; {
 		OptixProgramGroupOptions options = {};
 
@@ -140,7 +151,11 @@ int main()
 		));
 	}
 
-	/* Create a pipeline from the groups. */
+
+
+	/*
+	 * Create the pipeline
+	 */
 	OptixPipeline pipeline = nullptr; {
 		/* Creation. */
 		OptixProgramGroup program_groups[] = { radiance_raygen_program, radiance_hit_program, radiance_miss_program, shadow_hit_program, shadow_miss_program };
@@ -165,53 +180,11 @@ int main()
 	}
 
 
-	/* Prepare accelerated structures. */
-	
-	const struct Description {
-		const char * path;
-		float transform[12];
-	} descriptions[] = {
-		{"resources/floor.glb",
-			{1, 0, 0, 0,	0, 1, 0, 0, 	0, 0, 1, 0}},
-		{"resources/room.glb",
-			{1, 0, 0, 0,	0, 1, 0, 0, 	0, 0, 1, 0}},
-		{"resources/simple_dining_table.glb",
-			{.004, 0, 0, 0,	0, .004, 0, .7, 	0, 0, .004, 0}},
-		{"resources/retro_light.glb",
-			{.01, 0, 0, 0,	0, .01, 0, 6.7, 	0, 0, .01, 0}},
-		// {"resources/test.glb", make_float3(.6,.6,.6), .9, .1,
-		// 	{.01, 0, 0, 1,	0, .01, 0, 5, 	0, 0, .01, 0}},
-	};
-	const int file_count = sizeof(descriptions) / sizeof(*descriptions);
 
-	struct Model {
-		CUdeviceptr d_index;
-		CUdeviceptr d_vertex;
-		CUdeviceptr d_normal;
-		CUdeviceptr d_uv;
-		CUdeviceptr d_gas_mem;
-		int material_id;
-	};
-#define MAX_MODELS 60
-	Model models[MAX_MODELS];
-	int model_count = 0;
-
-
-	struct Material {
-		float roughness;
-		float metallic;
-		int texture_id;
-	};
-#define MAX_MATERIALS 60
-	Material materials[MAX_MATERIALS];
-	int material_count = 0;
-
-	struct Texture {
-		cudaArray_t d_array;
-		cudaTextureObject_t d_texture;
-		int width;
-		int height;
-	};
+	/*
+	 * Load textures
+	 */
+	// Input
 	const char * texture_paths[] = {
 		"resources/sdt_fabric.png",
 		"resources/sdt_marble.png",
@@ -227,11 +200,20 @@ int main()
 		"resources/lamp.png",
 	};
 	const int texture_count = sizeof(texture_paths) / sizeof(*texture_paths);
+
+	// Storage
+	struct Texture {
+		cudaArray_t d_array;
+		cudaTextureObject_t d_texture;
+		int width;
+		int height;
+	};
 	Texture textures[texture_count];
 
 	for (int i = 0; i < texture_count; ++i) {
 		Texture & tex = textures[i];
 
+		// Load data
 		int channels;
 		unsigned char * data = stbi_load(texture_paths[i], &tex.width, &tex.height, &channels, 4);
 		if (!data) {
@@ -239,6 +221,7 @@ int main()
 			exit(1);
 		}
 
+		// Move to GPU
 		auto chan_desc = cudaCreateChannelDesc<uchar4>();
 		cudaMallocArray(&tex.d_array, &chan_desc, tex.width, tex.height);
 		cudaMemcpy2DToArray(tex.d_array, 0, 0, data, tex.width
@@ -246,7 +229,7 @@ int main()
 			tex.height, cudaMemcpyHostToDevice);
 		stbi_image_free(data);
 
-		
+		// Texture creation
 		cudaResourceDesc resource_desc = {};
 		resource_desc.resType = cudaResourceTypeArray;
 		resource_desc.res.array.array = tex.d_array;
@@ -261,6 +244,51 @@ int main()
 		cudaCreateTextureObject(&tex.d_texture, &resource_desc, &texture_desc, 0);
 	}
 
+
+
+	/*
+	 * Load models
+	 */
+	const struct Description {
+		const char * path;
+		float transform[12];
+	} descriptions[] = {
+		{"resources/floor.glb",
+			{1, 0, 0, 0,	0, 1, 0, 0, 		0, 0, 1, 0}},
+		{"resources/room.glb",
+			{1, 0, 0, 0,	0, 1, 0, 0, 		0, 0, 1, 0}},
+		{"resources/simple_dining_table.glb",
+			{.004, 0, 0, 0,	0, .004, 0, .7, 	0, 0, .004, 0}},
+		{"resources/retro_light.glb",
+			{.01, 0, 0, 0,	0, .01, 0, 6.7, 	0, 0, .01, 0}},
+		// {"resources/test.glb", make_float3(.6,.6,.6), .9, .1,
+		// 	{.01, 0, 0, 1,	0, .01, 0, 5, 	0, 0, .01, 0}},
+	};
+	const int file_count = sizeof(descriptions) / sizeof(*descriptions);
+
+	// Specify types
+#define MAX_MODELS 60
+	struct Model {
+		CUdeviceptr d_index;
+		CUdeviceptr d_vertex;
+		CUdeviceptr d_normal;
+		CUdeviceptr d_uv;
+		CUdeviceptr d_gas_mem;
+		int material_id;
+	};
+	Model models[MAX_MODELS];
+	int model_count = 0;
+
+#define MAX_MATERIALS 60
+	struct Material {
+		float roughness;
+		float metallic;
+		int texture_id;
+	};
+	Material materials[MAX_MATERIALS];
+	int material_count = 0;
+
+	// Creation scope
 	CUdeviceptr d_tlas_mem;
 	OptixTraversableHandle tlas_handle;  {
 		const uint32_t input_flags[] = { OPTIX_GEOMETRY_FLAG_NONE };
@@ -412,19 +440,6 @@ int main()
 			}
 		}
 
-		materials[0].texture_id = 6; // grass
-		materials[1].texture_id = 10; // wall
-		materials[2].texture_id = 8; // floor
-		materials[3].texture_id = 9; // counter
-		materials[4].texture_id = 1; // curtain rod
-		materials[5].texture_id = 7; // curtain
-		materials[7].texture_id = 4; // plates / bowls
-		materials[8].texture_id = 3; // plants
-		materials[9].texture_id = 1; // table / chairs
-		materials[10].texture_id = 0; // tablemat
-		materials[11].texture_id = 1; // plates / bowls
-		materials[14].texture_id = 11; // lamp
-
 		// Allocate memory for the build
 		CUdeviceptr d_instances;
 		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_instances), sizeof(instances)));
@@ -458,23 +473,45 @@ int main()
 	}
 
 
+
+	/*
+	 * Assign material textures
+	 */
+	materials[0].texture_id = 6; // grass
+	materials[1].texture_id = 10; // wall
+	materials[2].texture_id = 8; // floor
+	materials[3].texture_id = 9; // counter
+	materials[4].texture_id = 1; // curtain rod
+	materials[5].texture_id = 7; // curtain
+	materials[7].texture_id = 4; // plates / bowls
+	materials[8].texture_id = 3; // plants
+	materials[9].texture_id = 1; // table / chairs
+	materials[10].texture_id = 0; // tablemat
+	materials[11].texture_id = 1; // plates / bowls
+	materials[14].texture_id = 11; // lamp
+
+
+
 	/* Prepare environment map. */
 	cudaArray_t d_sunset_array;
 	cudaTextureObject_t d_sunset_texture;
 	{
+		// Load HDR
 		int width, height, channels;
 		float * data = stbi_loadf("resources/sunset.hdr", &width, &height, &channels, 4);
 		if (!data) {
 			fputs("Failed to load 'resources/sunset.hdr'.\n", stderr);
 			exit(1);
 		}
+
+		// Move to GPU
 		auto chan_desc = cudaCreateChannelDesc<float4>();
 		cudaMallocArray(&d_sunset_array, &chan_desc, width, height, 0);
 		cudaMemcpy2DToArray(d_sunset_array, 0, 0, data, width * sizeof(float4), width * sizeof(float4),
 			height, cudaMemcpyHostToDevice);
 		stbi_image_free(data);
 
-
+		// Create texture
 		cudaResourceDesc resource_desc = {};
 		resource_desc.resType = cudaResourceTypeArray;
 		resource_desc.res.array.array = d_sunset_array;
@@ -490,15 +527,20 @@ int main()
 	}
 
 
+
+	/*
+	 * Output description
+	 */
 	CUdeviceptr d_spectral_buffer;
 	const size_t output_width = 1000, output_height = 1000;
 	const size_t output_count = output_width * output_height;
 	const size_t output_size = output_count * SPECTRAL_SAMPLES * sizeof(float);
 	CUDA_CALL(cudaMalloc(reinterpret_cast<void **>(&d_spectral_buffer), output_size));
 
-	/* Set up shader binding table. */
-	// Have closest hit include the geometries index, vertex, normal info
-	// they should all share a pointer to a list of area lights.
+
+	/*
+	 * Set up shader binding table.
+	 */
 	OptixShaderBindingTable sbt = {}; {
 		/* Raygen record. */
 		// Create record on Host.
@@ -574,7 +616,10 @@ int main()
 	}
 
 
-	/* Launch the application. */
+
+	/*
+	 * Launch the application.
+	 */
 
 	float3 cam_up = make_float3(0, 1, 0);
 	// float3 cam_pos = make_float3(0, 6, -6);
@@ -588,38 +633,33 @@ int main()
 	float3 cam_v = cross(cam_w, cam_u);
 	
 	puts("Launching application.");
-	for (uint y = 0; y < output_height; y += TILE_SIZE) {
-		for (uint x = 0; x < output_width; x += TILE_SIZE) {
-			CUstream stream;
-			CUDA_CALL(cudaStreamCreate(&stream));
+	{
+		CUstream stream;
+		CUDA_CALL(cudaStreamCreate(&stream));
 
-			Params params = {
-				.spectra = reinterpret_cast<float *>(d_spectral_buffer),
-				.output_width = output_width,
-				.output_height = output_height,
-				.offset_x = x,
-				.offset_y = y,
-				.cam_pos = cam_pos,
-				.cam_u = cam_u,
-				.cam_v = cam_v,
-				.cam_w = cam_w,
-				.handle = tlas_handle
-			};
+		// Specify this launches parameters
+		Params params = {
+			.spectra = reinterpret_cast<float *>(d_spectral_buffer),
+			.output_width = output_width,
+			.output_height = output_height,
+			.cam_pos = cam_pos,
+			.cam_u = cam_u,
+			.cam_v = cam_v,
+			.cam_w = cam_w,
+			.handle = tlas_handle
+		};
 
+		// Pass to GPU
+		CUdeviceptr d_params;
+		CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(params)));
+		CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_params), &params, sizeof(params),
+			cudaMemcpyHostToDevice));
 
-			CUdeviceptr d_params;
-			CUDA_CALL(cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(params)));
-			CUDA_CALL(cudaMemcpy(reinterpret_cast<void*>(d_params), &params, sizeof(params),
-				cudaMemcpyHostToDevice));
+		// Launch
+		OPTIX_CALL(optixLaunch(pipeline, stream, d_params, sizeof(params), &sbt,
+			output_width, output_height, 1));
 
-			OPTIX_CALL(optixLaunch(pipeline, stream, d_params, sizeof(params), &sbt,
-				min(output_width - x, TILE_SIZE),
-				min(output_height - y, TILE_SIZE),
-				1));
-
-			CUDA_CALL(cudaFree(reinterpret_cast<void*>(d_params)));
-		}
-
+		CUDA_CALL(cudaFree(reinterpret_cast<void*>(d_params)));
 	}
 
 	/* Write results. */

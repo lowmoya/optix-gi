@@ -85,7 +85,7 @@ $(DEVDEPOUT)%.d: $(DEV)%.cu
 
 $(DEVOUT)%.ptx: $(DEV)%.cu $(DEVDEPOUT)%.d
 	@if [ ! -f .ptxmark ]; then \
-		echo  -e '\n=> Compiling PTX Files'; \
+		echo '\n=> Compiling PTX Files'; \
 		rm -f .depmark; \
 		touch .ptxmark; \
 	fi

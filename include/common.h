@@ -31,8 +31,6 @@ struct Params {
     float * spectra;
     unsigned int output_width;
     unsigned int output_height;
-    unsigned int offset_x;
-    unsigned int offset_y;
     float3 cam_pos;
     float3 cam_u, cam_v, cam_w;
     OptixTraversableHandle handle;
