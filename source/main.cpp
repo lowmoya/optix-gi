@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -47,7 +48,41 @@ template <> struct SbtRecord<void> {
 	__align__(OPTIX_SBT_RECORD_ALIGNMENT) char header[OPTIX_SBT_RECORD_HEADER_SIZE];
 };
 
+float CIE_X[] = {0.014310, 0.134380, 0.348280, 0.290800, 0.095640, 0.004900, 0.063270, 0.290400, 0.594500, 0.916300, 1.062200, 0.854450, 0.447900, 0.164900, 0.046770, 0.011359, };
+float CIE_Y[] = {0.000396, 0.004000, 0.023000, 0.060000, 0.139020, 0.323000, 0.710000, 0.954000, 0.995000, 0.870000, 0.631000, 0.381000, 0.175000, 0.061000, 0.017000, 0.004102, };
+float CIE_Z[] = {0.067850, 0.645600, 1.747060, 1.669200, 0.812950, 0.272000, 0.078250, 0.020300, 0.003900, 0.001650, 0.000800, 0.000190, 0.000020, 0.000000, 0.000000, 0.000000, };
 
+
+// Simple matrix helper functions
+void inverseMatrix(float * in, float * out)
+{
+	float determinant = in[0] * (in[4] * in[8] - in[5] * in[7])
+		- in[1] * (in[3] * in[8] - in[5] * in[6])
+		+ in[2] * (in[3] * in[7] - in[4] * in[6]);
+	if (!determinant) {
+		fputs("Err: Calling inverse matrix with a zero-determinant input.\n",
+		stderr);
+		return;
+	}
+	out[0] = (in[4] * in[8] - in[5] * in[7]) / determinant;
+	out[1] = -(in[1] * in[8] - in[2] * in[7]) / determinant;
+	out[2] = (in[1] * in[5] - in[2] * in[4]) / determinant;
+	out[3] = -(in[3] * in[8] - in[5] * in[6]) / determinant;
+	out[4] = (in[0] * in[8] - in[2] * in[6]) / determinant;
+	out[5] = -(in[0] * in[5] - in[2] * in[3]) / determinant;
+	out[6] = (in[3] * in[7] - in[4] * in[6]) / determinant;
+	out[7] = -(in[0] * in[7] - in[1] * in[6]) / determinant;
+	out[8] = (in[0] * in[4] - in[1] * in[3]) / determinant;
+}
+void multMatrix(float * mat, float * v_in, float * v_out)
+{
+	v_out[0] = mat[0] * v_in[0] + mat[1] * v_in[1] + mat[2] * v_in[2];
+	v_out[1] = mat[3] * v_in[0] + mat[4] * v_in[1] + mat[5] * v_in[2];
+	v_out[2] = mat[6] * v_in[0] + mat[7] * v_in[1] + mat[8] * v_in[2];
+}
+int min(int a, int b) {
+	return a < b ? a : b;
+}
 
 char * readFile(char const * path, int & length)
 {
@@ -90,7 +125,7 @@ int main()
 	OptixPipelineCompileOptions pipeline_comp_options = {
 		.usesMotionBlur = false,
 		.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING,
-		.numPayloadValues = 4, // change to three when using structered payload
+		.numPayloadValues = 5,
 		.numAttributeValues = 2,
 		.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE,
 		.pipelineLaunchParamsVariableName = "params"
@@ -548,6 +583,13 @@ int main()
 		cudaCreateTextureObject(&d_sunset_texture, &resource_desc, &texture_desc, 0);
 	}
 
+
+	CUdeviceptr d_spectral_buffer;
+	const size_t output_width = 800, output_height = 800;
+	const size_t output_count = output_width * output_height;
+	const size_t output_size = output_count * SPECTRAL_SAMPLES * sizeof(float);
+	CUDA_CALL(cudaMalloc(reinterpret_cast<void **>(&d_spectral_buffer), output_size));
+
 	/* Set up shader binding table. */
 	// Have closest hit include the geometries index, vertex, normal info
 	// they should all share a pointer to a list of area lights.
@@ -576,6 +618,7 @@ int main()
 				case RT_RADIANCE:
 					OPTIX_CALL(optixSbtRecordPackHeader(radiance_hit_program, hit_records + index));
 					hit_records[index].data = {
+						.spectra = reinterpret_cast<float *>(d_spectral_buffer),
 						.indices = reinterpret_cast<uint3*>(models[m].d_index),
 						.vertices = reinterpret_cast<float3*>(models[m].d_vertex),
 						.normals = reinterpret_cast<float3*>(models[m].d_normal),
@@ -588,7 +631,9 @@ int main()
 					break;
 				case RT_SHADOW:
 					OPTIX_CALL(optixSbtRecordPackHeader(shadow_hit_program, hit_records + index));
-					hit_records[index].data = {};
+					hit_records[index].data = {
+						.spectra = reinterpret_cast<float *>(d_spectral_buffer),
+					};
 					break;
 				}
 				
@@ -624,12 +669,6 @@ int main()
 		sbt.missRecordCount = sizeof(miss_records)/sizeof(miss_records[0]);
 	}
 
-	uchar4 * d_render_buffer = nullptr;
-	const size_t output_width = 800, output_height = 600;
-	const size_t output_count = output_width * output_height;
-	const size_t output_size = output_count * sizeof(uchar4);
-	CUDA_CALL(cudaMalloc(reinterpret_cast<void **>(&d_render_buffer), output_size));
-
 
 	/* Launch the application. */
 	puts("Launching application.");
@@ -638,9 +677,9 @@ int main()
 		CUDA_CALL(cudaStreamCreate(&stream));
 
 		Params params;
-		params.image = d_render_buffer;
-		params.image_width = output_width;
-		params.image_height = output_height;
+		params.spectra = reinterpret_cast<float *>(d_spectral_buffer);
+		params.output_width = output_width;
+		params.output_height = output_height;
 		params.cam_eye = make_float3(0, 6, -6);
 		params.cam_u = make_float3(1, 0, 0);
 		params.cam_v = normalized(make_float3(0, 1, .1));
@@ -663,12 +702,67 @@ int main()
 	/* Write results. */
 	puts("Writing results.");
 	{
-		uchar4 output_buffer[output_count];
-		CUDA_CALL(cudaMemcpy(output_buffer, d_render_buffer, output_size, cudaMemcpyDeviceToHost));
+		float * spectral_buffer = (float *)malloc(output_count * SPECTRAL_SAMPLES * sizeof(float));
+		CUDA_CALL(cudaMemcpy(spectral_buffer, reinterpret_cast<void*>(d_spectral_buffer), output_size, cudaMemcpyDeviceToHost));
+		uchar4 * output_buffer = (uchar4 *)malloc(output_count * sizeof(uchar4));
+
+		static float xyz_transform[9];
+		const float xw = 0.3127, yw = 0.3290, Yw = 1.0;
+		const float xr = 0.640, yr = 0.330, xg = 0.3, yg = 0.6, xb = 0.150, yb = 0.060;
+
+		// Calculate the whitepoint colorspace.
+		const float zr = 1 - xr - yr, zg = 1 - xg - yg, zb = 1 - xb - yb, zw = 1 - xw - yw;
+		const float Xw = xw * Yw / yw, Zw = zw * Yw / yw;
+		// Calculate the RGB channels.
+		float channel_transform[9] = { xr, xg, xb, yr, yg, yb, zr, zg, zb };
+		float whitepoint_transform[9];
+		inverseMatrix(channel_transform, whitepoint_transform);
+		float whitepoint[3] = { Xw, Yw, Zw };
+		float channels[3];
+		multMatrix(whitepoint_transform, whitepoint, channels);
+		// Calculate the transform
+		float rgb_transform[9] = {
+			xr * channels[0], xg * channels[1], xb * channels[2],
+			yr * channels[0], yg * channels[1], yb * channels[2],
+			zr * channels[0], zg * channels[1], zb * channels[2]};
+		inverseMatrix(rgb_transform, xyz_transform);
+
+		for (int i = 0; i < output_count; ++i) {
+			float * spectrum = spectral_buffer + i * SPECTRAL_SAMPLES;
+
+			// Calculate the CIE primary values
+			float X = 0, Y = 0, Z = 0;
+			for (int nm = 0; nm < SPECTRAL_SAMPLES; ++nm) {
+				X += spectrum[nm] * CIE_X[nm] * SPECTRAL_STEP;
+				Y += spectrum[nm] * CIE_Y[nm] * SPECTRAL_STEP;
+				Z += spectrum[nm] * CIE_Z[nm] * SPECTRAL_STEP;
+				printf("%d %d %f %f %f\n", i, nm, spectrum[nm]);
+			}
+
+			float XYZ_sum = X + Y + Z;
+			float x = 0, y = 0, z = 0;
+			if (XYZ_sum) {
+				x = X / XYZ_sum;
+				y = Y / XYZ_sum;
+				z = Z / XYZ_sum;
+			}
+
+			// Calculate the final RGB values
+			float xyz[3] = { x, y, z };
+			float rgb[3];
+			multMatrix(xyz_transform, xyz, rgb);
+
+			output_buffer[i] = make_uchar4(
+				min(rgb[0] * 255, 255), min(rgb[1] * 255, 255), min(rgb[2] * 255, 255), 255
+			);
+		}
+
 		stbi_flip_vertically_on_write(true);
 		stbi_write_png("output.png", output_width, output_height, 4, output_buffer,
 			output_width * sizeof(uchar4));
-		CUDA_CALL(cudaFree(d_render_buffer));
+		CUDA_CALL(cudaFree(reinterpret_cast<void*>(d_spectral_buffer)));
+		free(output_buffer);
+		free(spectral_buffer);
 	}
 
 	/* Cleanup. */

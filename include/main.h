@@ -1,16 +1,26 @@
 #ifndef AVA_MAIN_H
 #define AVA_MAIN_H
 
+#define SPECTRAL_SAMPLES 16
+#define SPECTRAL_START 400
+#define SPECTRAL_END 700
+#define SPECTRAL_STEP ((SPECTRAL_END - SPECTRAL_END) / (SPECTRAL_SAMPLES - 1))
+
+#define MAX_TRACING_DEPTH 2
+#define INDIRECT_SAMPLES 1
+#define LIGHT_SAMPLES 1
+
 struct Params {
-    uchar4 * image;
-    unsigned int image_width;
-    unsigned int image_height;
+    float * spectra;
+    unsigned int output_width;
+    unsigned int output_height;
     float3 cam_eye;
     float3 cam_u, cam_v, cam_w;
     OptixTraversableHandle handle;
 };
 
 struct HitGroupData {
+    float * spectra;
     uint3 * indices;
     float3 * vertices;
     float3 * normals;
@@ -35,10 +45,6 @@ enum MissType {
     MT_COUNT
 };
 
-
-#define MAX_TRACING_DEPTH 3
-#define INDIRECT_SAMPLES 30
-#define LIGHT_SAMPLES 3
 
 /* Math extensions */
 inline __host__ __device__
