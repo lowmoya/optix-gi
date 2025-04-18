@@ -28,16 +28,18 @@ __global__ void __raygen__radiance()
 {
     /* Generate the ray. */
     const uint3 launch_index = optixGetLaunchIndex();
-    const float3 ray_origin = params.cam_eye;
+    const float3 ray_origin = params.cam_pos;
     const float3 ray_direction = normalized(
         params.cam_w
-        + (float)(2.0f * ((float)launch_index.x + 0.5)
+        + (float)(2.0f * ((float)(launch_index.x + params.offset_x) + 0.5)
             / (float)params.output_width - 1.0f) * params.cam_u
-        + (float)(2.0f * ((float)launch_index.y + 0.5)
+        + (float)(2.0f * ((float)(launch_index.y + params.offset_y) + 0.5)
             / (float)params.output_height - 1.0f) * params.cam_v
     );
-    unsigned int spectra_index = (launch_index.x + params.output_width * launch_index.y)
-        * SPECTRAL_SAMPLES;
+    unsigned int spectra_index =
+        ((launch_index.x + params.offset_x)
+        + params.output_width * (launch_index.y + params.offset_y))
+            * SPECTRAL_SAMPLES;
 
     /* Initialize spectra to 0. */
     for (int i = 0; i < SPECTRAL_SAMPLES; ++i)
@@ -48,7 +50,6 @@ __global__ void __raygen__radiance()
     storePointer(params.spectra + spectra_index, ptr_lh, ptr_rh);
 
     unsigned int depth = 1;
-
 
 
     optixTrace(params.handle, ray_origin, ray_direction, 0.0f, 1e16f,
@@ -67,6 +68,10 @@ __device__
 float minf(float a, float b) {
     return a > b ? b : a;
 }
+__device__
+float maxf(float a, float b) {
+    return a > b ? a : b;
+}
 
 // Based on distributions from
 // https://en.wikipedia.org/wiki/Specular_highlight
@@ -76,10 +81,11 @@ float spectrumBRDF(float3 incoming, float3 outgoing, float3 normal, float albedo
 {
     // Calculate common variables
     float3 h = normalized(incoming + outgoing);
-    float dLN = max(dot(normal, outgoing), 0.0);
-    float dVN = max(dot(normal, incoming), 0.0);
-    float dHN = max(dot(normal, h), 0.0);
-    float dVH = max(dot(incoming, h), 0.0);
+    float dLN = max(dot(normal, outgoing), 0.0001);
+    float dVN = max(dot(normal, incoming), 0.0001);
+    float dHN = min(max(dot(normal, h), 0.0001), 1.0);
+    float dVH = max(dot(incoming, h), 0.0001);
+    roughness = max(roughness, 0.0001);
 
     // Calculate fresnel reflectance
     float F0 = .04 + metallic * (albedo - .04);
@@ -103,8 +109,7 @@ float spectrumBRDF(float3 incoming, float3 outgoing, float3 normal, float albedo
     // Diffuse model
     float kd = (1 - F) * (1 - metallic) * (float)albedo / M_PIf;
 
-    // return kspec + kd;
-    return albedo;
+    return kspec + kd;
 }
 
 // Rewrite
@@ -180,16 +185,12 @@ __device__ float guassian(float wavelength, float center, float distribution) {
     float difference = (wavelength - center) / distribution;
     return expf(-0.5 * difference * difference);
 }
-__device__ void makeSpectrum(float3 color, float * spectrum) {
-    const float dist = 30;
-
+__device__ void makeSpectrum(float3 color, float * samples) {
     for (int i = 0; i < SPECTRAL_SAMPLES; ++i) {
         const int wavelength = SPECTRAL_START + i * SPECTRAL_STEP;
-        spectrum[i] += (
-            color.z * guassian(wavelength, 450, 30)
+        samples[i] += (color.z * guassian(wavelength, 450, 30)
             + color.y * guassian(wavelength, 530, 30)
-            + color.x * guassian(wavelength, 620, 30)
-            );
+            + color.x * guassian(wavelength, 620, 30));
     }
 }
 
@@ -219,100 +220,112 @@ __global__ void __closesthit__radiance()
         + bc.y * group_data.uv[indices.z]; 
 
     const float4 texture = tex2D<float4>(group_data.texture, uv.x, uv.y);
-    const float3 albedo = 3.0 * make_float3(texture.x, texture.y, texture.z);
-    float albedo_spectrum[SPECTRAL_SAMPLES];
-    // makeSpectrum(make_float3(3, 3, 3), albedo_spectrum);
-    // for (int i = 0; i < 16; ++i) {
-    //     spectrum[i] = albedo_spectrum[i];
-    // }
+    const float3 albedo = make_float3(texture.x, texture.y, texture.z);
+    float albedo_spectrum[SPECTRAL_SAMPLES] = {};
+    makeSpectrum(albedo, albedo_spectrum);
 
-        makeSpectrum(albedo, spectrum);
-    // /* Direct lighting */
-    // Light lights[] = {
-    //     {
-    //         normalized(make_float3(-1, 2, 0)), make_float3(0, 0, 0), make_float3(0, 0, 0),
-    //         10, 10,
-    //         3, 1, 1,
-    //         {
-    //             0.02f, 0.05f, 0.10f, 0.20f, 0.30f, 0.40f, 0.50f, 0.60f,
-    //             0.70f, 0.80f, 0.90f, 1.00f, 0.90f, 0.80f, 0.70f, 0.60f 
-    //         }
-    //     },
-    //     {
-    //         make_float3(0,6.9,0),
-    //         make_float3(1, 0, 0), make_float3(0, 0, 1),
-    //         .3, .3,
-    //         60, 1 * LIGHT_SAMPLES, 0,
-    //         {
-    //             0.01f, 0.02f, 0.05f, 0.10f, 0.15f, 0.20f, 0.25f, 0.30f,
-    //             0.35f, 0.40f, 0.45f, 0.50f, 0.45f, 0.40f, 0.35f, 0.30f 
-    //         }
-    //     }
-    // };
-    // int light_count = sizeof(lights) / sizeof(Light);
+    /* Direct lighting */
+    Light lights[] = {
+        {
+            normalized(make_float3(-1, 2, 0)), make_float3(0, 0, 0), make_float3(0, 0, 0),
+            10, 10,
+            3, 1, 1,
+            {
+                0.02f, 0.05f, 0.10f, 0.20f, 0.30f, 0.40f, 0.50f, 0.60f,
+                0.70f, 0.80f, 0.90f, 1.00f, 0.90f, 0.80f, 0.70f, 0.60f 
+            }
+        },
+        {
+            make_float3(0,6.9,0),
+            make_float3(1, 0, 0), make_float3(0, 0, 1),
+            .3, .3,
+            60, 1 * LIGHT_SAMPLES, 0,
+            {
+                0.05, 0.15, 0.25, 0.45, 0.75, 1.00, 1.00, 1.00,
+                0.95, 0.85, 0.75, 0.65, 0.55, 0.45, 0.30, 0.10
+            }
+        }
+    };
+    int light_count = sizeof(lights) / sizeof(Light);
     
+    const float3 outgoing = -1 * optixGetWorldRayDirection();
     
-    // const float3 outgoing = -1 * optixGetWorldRayDirection();
-    // for (int i = 0; i < light_count; ++i) {
-    //     for (int s = 0; s < lights[i].samples; ++s) {
-    //         float incoming_mag;
-    //         float3 incoming_dir;
-    //         uint unobstructed = 0;
-    //         if (!lights[i].sun) {
-    //             // Select the incoming dir at random
-    //             float3 sample = lights[i].position
-    //                 + ((double)sobol(s, 0) / (double)__UINT32_MAX__) * lights[i].width_dir * lights[i].width
-    //                 + ((double)sobol(s, 1) / (double)__UINT32_MAX__) * lights[i].height_dir * lights[i].height;
-    //             float3 incoming = sample - position;
-    //             incoming_mag = magnitude(incoming);
-    //             incoming_dir = incoming / incoming_mag;
-    //             optixTrace(params.handle, position, incoming_dir, 0.001, incoming_mag, 0, OptixVisibilityMask(255),
-    //                 OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT, RT_SHADOW, RT_COUNT, MT_SHADOW, unobstructed);
-    //         } else {
-    //             // Select the point as incoming dir
-    //             // Remove distance from equation
-    //             incoming_mag = 1;
-    //             incoming_dir = lights[i].position;
-    //             optixTrace(params.handle, position, incoming_dir, 0.001, 1e16, 0, OptixVisibilityMask(255),
-    //                 OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT, RT_SHADOW, RT_COUNT, MT_SHADOW, unobstructed);
-    //         }
-    //         if (!unobstructed)
-    //             continue;
+    for (int li = 0; li < light_count; ++li) {
+        for (int s = 0; s < lights[li].samples; ++s) {
+            float incoming_mag;
+            float3 incoming_dir;
+            uint unobstructed = 0;
+            if (!lights[li].sun) {
+                // Select the incoming dir at random
+                float3 sample = lights[li].position
+                    + ((double)sobol(s, 0) / (double)__UINT32_MAX__) * lights[li].width_dir * lights[li].width
+                    + ((double)sobol(s, 1) / (double)__UINT32_MAX__) * lights[li].height_dir * lights[li].height;
+                float3 incoming = sample - position;
+                incoming_mag = magnitude(incoming);
+                incoming_dir = normalized(incoming / incoming_mag);
+                optixTrace(params.handle, position, incoming_dir, 0.001, incoming_mag, 0, OptixVisibilityMask(255),
+                    OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT, RT_SHADOW, RT_COUNT, MT_SHADOW, unobstructed);
+            } else {
+                // Select the point as incoming dir
+                // Remove distance from equation
+                incoming_mag = 1;
+                incoming_dir = lights[li].position;
+                optixTrace(params.handle, position, incoming_dir, 0.001, 1e16, 0, OptixVisibilityMask(255),
+                    OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT, RT_SHADOW, RT_COUNT, MT_SHADOW, unobstructed);
+            }
+            if (!unobstructed)
+                continue;
             
-    //         // Should use the brdf to apply to spectrum
-    //         float light_scale = lights[i].intensity * dot(normal, incoming_dir)
-    //             / (incoming_mag * incoming_mag * (float)lights[i].samples);
-            
-    //         for (int si = 0; si < SPECTRAL_SAMPLES; ++si) {
-    //             // spectrum[si] += light_scale * lights[i].spectrum[si]
-    //             //     * spectrumBRDF(incoming_dir, outgoing, normal, albedo_spectrum[si], group_data.roughness, group_data.metallic);
-    //         }
-    //     }
-    // }
+            // Should use the brdf to apply to spectrum
+            if (depth == 1) {
+                float light_scale = lights[li].intensity * dot(normal, incoming_dir)
+                    / (incoming_mag * incoming_mag * (float)lights[li].samples);
+                
+                for (int si = 0; si < SPECTRAL_SAMPLES; ++si) {
+                    spectrum[si] += light_scale * lights[li].spectrum[si]
+                        * spectrumBRDF(incoming_dir, outgoing, normal, albedo_spectrum[si], group_data.roughness, group_data.metallic);
+                }
+            } else {
+                incoming_mag = max(incoming_mag, 2.0);
+                for (int si = 0; si < SPECTRAL_SAMPLES; ++si) {
+                    spectrum[si] += 
+                        (lights[li].intensity * lights[li].spectrum[si] * dot(normal, incoming_dir)
+                        * spectrumBRDF(incoming_dir, outgoing, normal, albedo_spectrum[si], group_data.roughness, group_data.metallic))
+                        / (incoming_mag * incoming_mag * lights[li].samples);
+                }
+            }
+        }
+    }
 
     
     /* Indirect lighting */
-    // if (depth < MAX_TRACING_DEPTH - 1) {
-    //     for (int s = 0; s < INDIRECT_SAMPLES; ++s) { 
-    //         float3 sample_direction = sampleHemisphereUniform(normal,
-    //             (double)sobol(s, 0) / (double)__UINT32_MAX__, (double)sobol(s, 1) / (double)__UINT32_MAX__);
+    if (depth < MAX_TRACING_DEPTH - 1) {
+        for (int s = 0; s < INDIRECT_SAMPLES; ++s) { 
+            float3 sample_direction = sampleHemisphereUniform(normal,
+                (double)sobol(s, 0) / (double)__UINT32_MAX__, (double)sobol(s, 1) / (double)__UINT32_MAX__);
 
-    //         const float3 brdf = albedoBRDF(sample_direction, outgoing, normal, albedo,
-    //             group_data.roughness, group_data.metallic);
+            float in_spectrum[SPECTRAL_SAMPLES] = {};
 
-    //         uint p_spectra_index = spectra_index;
+            uint next_depth = depth + 1;
+            uint ptr_lh, ptr_rh;
+            storePointer(in_spectrum, ptr_lh, ptr_rh);
 
-    //         float partial = (1.0 / (float)INDIRECT_SAMPLES) * dot(sample_direction, normal);
-    //         uint p_cont_r = __float_as_uint(cont_r * brdf.x * partial);
-    //         uint p_cont_g = __float_as_uint(cont_g * brdf.y * partial);
-    //         uint p_cont_b = __float_as_uint(cont_b * brdf.z * partial);
-            
-    //         uint p_next_depth = depth + 1;
+            optixTrace(params.handle, position, sample_direction, 0.001, 1e16, 0, OptixVisibilityMask(255),
+                OPTIX_RAY_FLAG_NONE, RT_RADIANCE, RT_COUNT, MT_RADIANCE, next_depth, ptr_lh, ptr_rh);
 
-    //         optixTrace(params.handle, position, sample_direction, 0.001, 1e16, 0, OptixVisibilityMask(255),
-    //             OPTIX_RAY_FLAG_NONE, RT_RADIANCE, RT_COUNT, MT_RADIANCE, p_spectra_index, p_cont_r,
-    //             p_cont_g, p_cont_b, p_next_depth);
-    //     }
+
+            for (int si = 0; si < SPECTRAL_SAMPLES; ++si) {
+                spectrum[si] +=
+                    in_spectrum[si] * dot(normal, sample_direction)
+                    * spectrumBRDF(sample_direction, outgoing, normal, albedo_spectrum[si], group_data.roughness, group_data.metallic)
+                    / (float)INDIRECT_SAMPLES;
+            }
+        }
+    }
+
+    // if (depth != 0) {
+    //     for (int i = 0; i < SPECTRAL_SAMPLES; ++i)
+    //         spectrum[i] = 0;
     // }
 }
 

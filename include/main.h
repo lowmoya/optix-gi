@@ -4,17 +4,22 @@
 #define SPECTRAL_SAMPLES 16
 #define SPECTRAL_START 400
 #define SPECTRAL_END 700
-#define SPECTRAL_STEP ((SPECTRAL_END - SPECTRAL_START) / (SPECTRAL_SAMPLES - 1))
+#define SPECTRAL_STEP (int)((SPECTRAL_END - SPECTRAL_START) / (SPECTRAL_SAMPLES - 1))
 
-#define MAX_TRACING_DEPTH 2
+#define MAX_TRACING_DEPTH 3
+// #define INDIRECT_SAMPLES 300
+// #define LIGHT_SAMPLES 40
 #define INDIRECT_SAMPLES 1
 #define LIGHT_SAMPLES 1
 
+#define TILE_SIZE 1000
 struct Params {
     float * spectra;
     unsigned int output_width;
     unsigned int output_height;
-    float3 cam_eye;
+    unsigned int offset_x;
+    unsigned int offset_y;
+    float3 cam_pos;
     float3 cam_u, cam_v, cam_w;
     OptixTraversableHandle handle;
 };

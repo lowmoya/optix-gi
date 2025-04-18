@@ -40,6 +40,7 @@ IF=$(INCLUDES:%=-I%)
 # endif
 test: $(EXE)
 	@echo -e '\n=> Starting Application'
+	@rm -rf ~/.cache/nvidia/GLCache/*
 	$(EXE)
 clean:
 	@echo -e '\n=> Removing Generated Content'
@@ -48,14 +49,14 @@ clean:
 
 # File tasks
 $(EXE):  $(PTXFILES) $(OBJFILES)
-	@rm -f .compmark .depmark .ptxmark
+	@rm -f .compmark .depmark
 	@echo -e '\n=> Linking Executable'
 	$(CC) $(OBJFILES) -o $@ $(LDF) $(LF)
 
 # Generative tasks
 $(SRCDEPOUT)%.d: $(SRC)%.cpp
 	@if [ ! -f .depmark ]; then \
-		echo -e '\n=> Collecting Dependencies'; \
+		echo '=> Collecting Dependencies'; \
 		rm -f .compmark; \
 		touch .depmark; \
 	fi

@@ -3,6 +3,8 @@
 
 #include "main.h"
 
+// Simple obstruction module
+
 extern "C"
 {
 __constant__ Params params;
