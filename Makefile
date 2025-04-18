@@ -65,7 +65,7 @@ $(SRCDEPOUT)%.d: $(SRC)%.cpp
 
 $(SRCOUT)%.o: $(SRC)%.cpp $(SRCDEPOUT)%.d
 	@if [ ! -f .compmark ]; then \
-		echo -e '\n=> Compiling Sources'; \
+		echo '\n=> Compiling Sources'; \
 		rm -f .depmark; \
 		touch .compmark; \
 	fi

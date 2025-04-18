@@ -622,12 +622,12 @@ int main()
 	 */
 
 	float3 cam_up = make_float3(0, 1, 0);
-	// float3 cam_pos = make_float3(0, 6, -6);
-	// float3 cam_w = normalized(make_float3(0, -1, 2));
+	float3 cam_pos = make_float3(0, 6, -6);
+	float3 cam_w = normalized(make_float3(0, -1, 2));
 	// float3 cam_pos = make_float3(4, 5, 2);
 	// float3 cam_w = normalized(make_float3(-2, -1, -1));
-	float3 cam_pos = make_float3(-6, 6, 0);
-	float3 cam_w = normalized(make_float3(2, -1, 0));
+	// float3 cam_pos = make_float3(-6, 6, 0);
+	// float3 cam_w = normalized(make_float3(2, -1, 0));
 
 	float3 cam_u = normalized(cross(cam_up, cam_w));
 	float3 cam_v = cross(cam_w, cam_u);
